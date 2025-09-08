@@ -1,18 +1,21 @@
 // Imports
 // Currently prefering to have one or two namespaces used in the functions
 use realfft::{RealFftPlanner, num_complex};
-use std::{fs, io::{self, Write}, path, time};
+use std::{
+    fs,
+    io::{self, Write},
+    path, time,
+};
 use symphonia::{core, default};
 
-// Hard-coded files
+// Hard-coded directories
 const INPUT_DIR: &str = "./inputs/";
 const OUTPUT_DIR: &str = "./outputs/";
 
-type AudioMatrix = ((Vec<f32>, Vec<f32>), core::audio::SignalSpec);
-// TODO: add error handling if file isn't audio
-// Currently handling io errors as
+type AudioMatrix = ((Vec<f64>, Vec<f64>), core::audio::SignalSpec);
 fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, core::errors::Error> {
     // TODO: check updated example code for Symphonia dev-0.6.0
+    // Numbers are from the Symphonia basic proceedures in its docs.rs
 
     // 1
     let code_registry = default::get_codecs();
@@ -37,13 +40,12 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, core::e
     let track = format.default_track().unwrap();
 
     // 8
-    // left_track.codec_params == right_track.codec_params, but are separate here for symmetry
     let mut decoder = code_registry.make(&track.codec_params, &Default::default())?;
 
     let track_id = track.id;
 
-    let mut left_samples: Vec<f32> = vec![];
-    let mut right_samples: Vec<f32> = vec![];
+    let mut left_samples: Vec<f64> = vec![];
+    let mut right_samples: Vec<f64> = vec![];
 
     let mut sample_buf = None;
     let mut meta_spec = core::audio::SignalSpec::new(0, core::audio::Channels::FRONT_LEFT);
@@ -61,11 +63,11 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, core::e
 
                         let duration = audio_buf.capacity() as u64;
 
-                        sample_buf = Some(core::audio::SampleBuffer::<f32>::new(duration, spec));
+                        sample_buf = Some(core::audio::SampleBuffer::<f64>::new(duration, spec));
                     }
 
                     if let Some(buf) = &mut sample_buf {
-                        // Might be better to
+                        // Doesn't seem like plannar (first half is left samples, second half is right) is working
                         buf.copy_interleaved_ref(audio_buf);
 
                         for sample in buf.samples().chunks_exact(2) {
@@ -74,6 +76,8 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, core::e
                         }
                     }
                 }
+                // For some reason, Symphonia is fine if the decode doesn't work?
+                // like with malformed data or something
                 Err(core::errors::Error::DecodeError(_)) => (),
                 Err(_) => break,
             }
@@ -88,6 +92,9 @@ fn next_fast_fft(rate: usize) -> usize {
     // RustFFT likes FFT lengths which are powers of 2 multiplied with powers of 3
     // We'll zero-pad the seconds anyway
     match rate {
+        4410 => 4608,
+        4800 => 5184,
+        9600 => 10368,
         40000 => 41472,   // 2**9 * 3**4
         44100 => 46656,   // 2**6 * 3**6
         48000 => 49152,   // 2**14 * 3**1
@@ -97,32 +104,36 @@ fn next_fast_fft(rate: usize) -> usize {
     }
 }
 
-fn window(n: usize, rate: usize) -> f32 {
+fn window(n: usize, rate: usize) -> f64 {
     // Windowing is used to make the signal fade in and out
     //   to prevent discontinuities, which causes spectral leakage (noise tuned to the music).
     // This function uses the Hann window, which is unoptimized but good enough for most sounds.
-    // One benefit is that window(n) + window(n + rate/2) == 1.0, so it's good to overlap
-    //   two FFTs in this form to return to the loudness of the original signal. However,
-    //   we're just doing window(n) + (1.0 - window(n)), which seems to have the same effect?
+    // One benefit is that window(n) + window(n + rate/2) == 1.0, so we get back to the original
+    //   level of the input if we overlap two FFTs with this offset between them.
 
     // If we wanted this to be continuous, do (n % rate) to ensure discontinuities
     // I.e. window(47999, 48000) == window(48000, 48000) == 0.0
-    (std::f32::consts::PI * n as f32 / (rate - 1) as f32)
+    (std::f64::consts::PI * n as f64 / (rate - 1) as f64)
         .sin()
         .powi(2)
 }
 
 fn process_samples(
-    data: &mut ((Vec<f32>, Vec<f32>), core::audio::SignalSpec),
-    planner: &mut RealFftPlanner<f32>,
-) -> (Vec<f32>, Vec<f32>) {
+    data: &mut ((Vec<f64>, Vec<f64>), core::audio::SignalSpec),
+    planner: &mut RealFftPlanner<f64>,
+) -> (Vec<f64>, Vec<f64>) {
     let left_channel = &mut data.0.0;
     let right_channel = &mut data.0.1;
-    let sample_rate = data.1.rate as usize;
+    // TODO: change name of modified sample rate
+    // Force minimum reconstructed frequency to 10 hz
+    let sample_rate = (data.1.rate as usize) / 10;
 
+    // It's better to add the offset between channels as silence here
+    // For the original signal, silence is added to the end, while the
+    //   offset signal's silence is added to the beginning
     let original_length = left_channel.len();
     let offset = sample_rate / 2;
-    let offset_vec = vec![0.0_f32; offset];
+    let offset_vec = vec![0.0_f64; offset];
     left_channel.append(&mut offset_vec.clone());
     right_channel.append(&mut offset_vec.clone());
     let mut not_left_channel = offset_vec.clone();
@@ -130,29 +141,27 @@ fn process_samples(
     not_left_channel.append(&mut left_channel.clone());
     not_right_channel.append(&mut right_channel.clone());
 
-    // Best FFT size is probably just the sample rate since it'll encompass all frequencies up to Nyquist (size/2 as hz)
-    // Any larger will give us garbage data in the ultrasonics (>20,000 hz) and worse timing resolution in exchange for better subsonic resolution (<20 hz)
-    // Might be faster to do size == 40000, so Nyquist is exactly 20,000 hz?
-    // TODO: check how much FFT reduces noise above Nyquist, since we know that size == 4096 is still good for some purposes
+    // Best to do a small FFT to prevent transient smearing
     let fft_size = next_fast_fft(sample_rate);
-    let recip_fft = (fft_size as f32).recip();
+    let recip_fft = (fft_size as f64).recip();
     let r2c = planner.plan_fft_forward(fft_size);
     let c2r = planner.plan_fft_inverse(fft_size);
 
-    // Since we're using one FFT per second, we add silence up to the next second
-    // We can then remove this silence later to get the original length
+    // The algorithm I want to use will chunk each signal by sample_rate, so it's better to round up
+    //   to the next multiple so we can use ChunksExact and have no remainder
     let silence_total = left_channel.len().next_multiple_of(sample_rate) - left_channel.len();
-    let silence = vec![0.0_f32; silence_total];
+    let silence = vec![0.0_f64; silence_total];
     left_channel.append(&mut silence.clone());
     right_channel.append(&mut silence.clone());
     not_left_channel.append(&mut silence.clone());
     not_right_channel.append(&mut silence.clone());
 
-    // The FFTs are larger than one second for performance reasons, so we add silence to each second
-    // This slightly improves frequency resolution, but does not add any additional info (i.e. more points of the same shape)
+    // The FFT size is greater than the sample rate for better performance, so we'll add silence to pad out chunks
+    // This does not add more info, just interpolates the signal
     let zero_padding_total = fft_size - sample_rate;
-    let zero_pad = vec![0.0_f32; zero_padding_total];
+    let zero_pad = vec![0.0_f64; zero_padding_total];
 
+    // Chunks idk
     let window = (0..sample_rate).map(|s| window(s, sample_rate));
     let left_chunks = left_channel.chunks_exact(sample_rate);
     let right_chunks = right_channel.chunks_exact(sample_rate);
@@ -162,26 +171,29 @@ fn process_samples(
     // The first bin is the DC bin, which is the average unheard noise
     // From what we've seen, this should be a real number (C + 0.0i), but it's better to be safe
     //   by zeroing it out in both axes
-    let new_dc = num_complex::Complex::new(0.0_f32, 0.0_f32);
+    let new_dc = num_complex::Complex::new(0.0_f64, 0.0_f64);
 
-    let mut processed_left: Vec<f32> = vec![];
-    let mut processed_right: Vec<f32> = vec![];
-    let mut processed_not_left: Vec<f32> = vec![];
-    let mut processed_not_right: Vec<f32> = vec![];
+    // Saving samples for later
+    let mut processed_left: Vec<f64> = vec![];
+    let mut processed_right: Vec<f64> = vec![];
+    let mut processed_not_left: Vec<f64> = vec![];
+    let mut processed_not_right: Vec<f64> = vec![];
 
     for chunk in left_chunks
         .zip(right_chunks)
         .zip(not_left_chunks.zip(not_right_chunks))
     {
+        // I think iterators are small?
         let left_chunk = chunk.0.0.iter().zip(window.clone());
         let right_chunk = chunk.0.1.iter().zip(window.clone());
         let not_left_chunk = chunk.1.0.iter().zip(window.clone());
         let not_right_chunk = chunk.1.1.iter().zip(window.clone());
 
-        let mut left: Vec<f32> = left_chunk.clone().map(|(s, w)| s * w).collect();
-        let mut right: Vec<f32> = right_chunk.clone().map(|(s, w)| s * w).collect();
-        let mut not_left: Vec<f32> = not_left_chunk.clone().map(|(s, w)| s * w).collect();
-        let mut not_right: Vec<f32> = not_right_chunk.clone().map(|(s, w)| s * w).collect();
+        // I don't know if there's a better way to window these, but it works i guess
+        let mut left: Vec<f64> = left_chunk.clone().map(|(s, w)| s * w).collect();
+        let mut right: Vec<f64> = right_chunk.clone().map(|(s, w)| s * w).collect();
+        let mut not_left: Vec<f64> = not_left_chunk.clone().map(|(s, w)| s * w).collect();
+        let mut not_right: Vec<f64> = not_right_chunk.clone().map(|(s, w)| s * w).collect();
 
         // Zero-pad signal for FFT
         left.append(&mut zero_pad.clone());
@@ -190,7 +202,7 @@ fn process_samples(
         not_right.append(&mut zero_pad.clone());
 
         // Create scratch FFT for RealFFT
-        // RustFFT uses .process_with_scratch() to get the same functionality
+        // RealFFT uses RustFFT's .process_with_scratch() for its .process() function
         let mut left_fft = r2c.make_output_vec();
         let mut right_fft = left_fft.clone();
         let mut not_left_fft = left_fft.clone();
@@ -198,8 +210,9 @@ fn process_samples(
 
         // Ignore errors by RealFFT
         // RustFFT does not return a Result after processing,
-        //   but RealFFT does return Results from numbers close to zero.
+        //   but RealFFT does return Results due to some zero-check
         //   RealFFT author says to just ignore these in the meantime.
+        // https://github.com/HEnquist/realfft/issues/41#issuecomment-2050347470
         let _ = r2c.process(&mut left, &mut left_fft);
         let _ = r2c.process(&mut right, &mut right_fft);
         let _ = r2c.process(&mut not_left, &mut not_left_fft);
@@ -218,6 +231,8 @@ fn process_samples(
             let not_right_r = not_right_fft[index].norm();
 
             // Align the phase of the left and right channels using the circular mean
+            // Usually, the side with the greater magnitude to not rotate much while the lesser one rotates more
+            // The regular mean would make both sides rotate equally, which seems to cause issues among FFTs
             let phase = (left_fft[index].im + right_fft[index].im)
                 .atan2(left_fft[index].re + right_fft[index].re);
             let not_phase = (not_left_fft[index].im + not_right_fft[index].im)
@@ -234,14 +249,15 @@ fn process_samples(
         let _ = c2r.process(&mut not_left_fft, &mut not_left);
         let _ = c2r.process(&mut not_right_fft, &mut not_right);
 
-        // Add per-channel FFTs and normalize values after forward and backward FFT
-        // Zero-padding ignored with this for-loop, since the actual size would be fft_size
+        // FFT zero-padding is ignored with this `for`` loop
         for index in 0..sample_rate {
+            // Normalize FFT values
             let new_left = left[index] * recip_fft;
             let new_right = right[index] * recip_fft;
             let new_not_left = not_left[index] * recip_fft;
             let new_not_right = not_right[index] * recip_fft;
 
+            // FFT processing has finished
             processed_left.push(new_left);
             processed_right.push(new_right);
             processed_not_left.push(new_not_left);
@@ -249,21 +265,21 @@ fn process_samples(
         }
     }
 
-    // Remove silence by using samples up to the original length of the signal
+    // Add the original and offset signals together to get the unwindowed level
     for index in 0..original_length {
         processed_left[index] += processed_not_left[index + offset];
         processed_right[index] += processed_not_right[index + offset];
     }
 
+    // Remove chunking zero-padding
     processed_left = processed_left[0..original_length].to_vec();
     processed_right = processed_right[0..original_length].to_vec();
-
     assert_eq!(processed_left.len(), original_length);
 
     // Remove overall DC after all local DC was removed
     // DC is just the average of the whole signal
-    let left_dc = processed_left.clone().iter().sum::<f32>() / original_length as f32;
-    let right_dc = processed_right.clone().iter().sum::<f32>() / original_length as f32;
+    let left_dc = processed_left.clone().iter().sum::<f64>() / original_length as f64;
+    let right_dc = processed_right.clone().iter().sum::<f64>() / original_length as f64;
     for index in 0..original_length {
         processed_left[index] -= left_dc;
         processed_right[index] -= right_dc;
@@ -289,11 +305,12 @@ fn process_samples(
         processed_right[index] *= equalizer;
     }
 
+    // Overall processing is done
     (processed_left, processed_right)
 }
 
 fn save_audio(
-    audio: (Vec<f32>, Vec<f32>),
+    audio: (Vec<f64>, Vec<f64>),
     file_path: &std::path::Path,
     metadata: &core::audio::SignalSpec,
 ) {
@@ -302,22 +319,23 @@ fn save_audio(
     let spec = hound::WavSpec {
         channels: 2,
         sample_rate: metadata.rate,
-        bits_per_sample: 32,
+        bits_per_sample: 32, // hound only supports 32-bit float
         sample_format: hound::SampleFormat::Float,
     };
     let mut writer = hound::WavWriter::create(file_path, spec).expect("Could not create writer");
     for index in 0..audio.0.len() {
         writer
-            .write_sample(audio.0[index])
+            .write_sample(audio.0[index] as f32)
             .expect("Could not write sample");
         writer
-            .write_sample(audio.1[index])
+            .write_sample(audio.1[index] as f32)
             .expect("Could not write sample");
     }
     writer.finalize().expect("Could not finalize WAV file");
 }
 
 fn get_paths(directory: path::PathBuf) -> io::Result<Vec<path::PathBuf>> {
+    // Recursive file path retriever
     let mut entries: Vec<path::PathBuf> = vec![];
     let folder_read = fs::read_dir(directory)?;
 
@@ -337,11 +355,11 @@ fn get_paths(directory: path::PathBuf) -> io::Result<Vec<path::PathBuf>> {
     Ok(entries)
 }
 
-// Possible io::Error from checking if INPUT_DIR and OUTPUT_DIR folders exist
 fn main() -> Result<(), core::errors::Error> {
     // Keeping the time for benchmarking
     let time = time::Instant::now();
 
+    // Check if INPUT_DIR exists, or create it if it doesn't
     match fs::exists(INPUT_DIR) {
         Ok(true) => {}
         Ok(false) => {
@@ -349,26 +367,28 @@ fn main() -> Result<(), core::errors::Error> {
             println!("Notice: Inputs folder created. Copy audio files here to process them.");
             return Ok(());
         }
+        // Symphonia has a wrapper for IoErrors
         Err(err) => return Err(core::errors::Error::IoError(err)),
     }
 
     // Get list of files in INPUT_DIR
-    // Currently
     let entries: Vec<path::PathBuf> = get_paths(INPUT_DIR.into())?;
 
     println!("File setup time: {:#?}", time.elapsed());
 
-    let mut real_planner = RealFftPlanner::<f32>::new();
+    let mut real_planner = RealFftPlanner::<f64>::new();
     for entry in entries {
         println!("Found file: {}", entry.display());
 
         print!("    Decoding...");
-        io::stdout().flush()?;
+        io::stdout().flush()?; // Show print instantly
         let mut output_path = path::PathBuf::new();
         let unprefix_output = entry.strip_prefix(INPUT_DIR).unwrap();
         output_path.push(OUTPUT_DIR);
         output_path.push(unprefix_output);
 
+        // If we can't properly decode the data, it's likely not audio data
+        // In this case, we just send it to OUTPUT_DIR so it's not spitting the warning every run
         let mut collected_data = match get_samples_and_metadata(&entry) {
             Ok(data) => data,
             Err(core::errors::Error::IoError(err)) => {
@@ -381,6 +401,7 @@ fn main() -> Result<(), core::errors::Error> {
                     return Err(core::errors::Error::IoError(err));
                 }
             }
+            // Usually happens if Symphonia attempts to open a .jpg or .png
             Err(core::errors::Error::Unsupported(_) | core::errors::Error::DecodeError(_)) => {
                 println!("    Invalid audio, sent to output");
                 fs::create_dir_all(output_path.parent().unwrap())?;

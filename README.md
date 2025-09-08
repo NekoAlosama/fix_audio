@@ -22,13 +22,12 @@ Known problems which I kinda plan on fixing:
 * Cannot copy tags from input to output (lack of ecosystem support?)
   * Symphonia only supports tag reading
   * hound does not support writing .wav Vorbis tags
-* Short silence adds some spectral noise
-* Average RMS may differ by at most 0.1dB due to f32 imprecision.
-  * Using f64 increases memory usage, imprecision might not matter in FFT?
-* Missing code comments
 * Does not support mono files
   * Force upmixing to stereo?
-  * Make sure to bypass phase alignment when doing so
+  * Make sure to bypass phase alignment
+* FFT introduces relatively-minor transient smearing / pre-echo
+  * Currently taking 0.1s per FFT, so the minimum reconstructed frequency is 10hz
+  * Unsure if this could be changed to 0.05s per FFT / 20 hz for better temporal resolution
 * Make code more idiomatic 
 * Make code faster
   * Reduce memory usage to make way for multithreading?
