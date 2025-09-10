@@ -7,3 +7,9 @@ edition = "2024"
 hound = "3.5.1"
 realfft = { version = "3.5.0", features = ["avx", "neon", "sse"] }
 symphonia = { version = "0.5.4", features = ["opt-simd", "all-codecs"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+incremental = true
+codegen-units = 1

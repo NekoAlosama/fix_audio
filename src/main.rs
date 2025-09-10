@@ -92,14 +92,25 @@ fn next_fast_fft(rate: usize) -> usize {
     // RustFFT likes FFT lengths which are powers of 2 multiplied with powers of 3
     // We'll zero-pad the seconds anyway
     match rate {
+        // 20 hz
+        2205 => 2304,
+        2400 => 2592,
+        // 4800 => 5184 // appears later in 10 hz
+
+        // 15 hz
+        2940 => 3072,
+        3200 => 3456,
+        6400 => 6561,
+
+        // 10 hz
         4410 => 4608,
-        4800 => 5184,
+        4800 => 5184, // also 20 hz for 96khz
         9600 => 10368,
-        40000 => 41472,   // 2**9 * 3**4
-        44100 => 46656,   // 2**6 * 3**6
-        48000 => 49152,   // 2**14 * 3**1
-        96000 => 98304,   // 2**15 * 3**1
-        192000 => 196608, // 2**16 * 3**1
+
+        // 1 hz
+        44100 => 46656,
+        48000 => 49152,
+        96000 => 98304,
         _ => 0,
     }
 }
@@ -125,8 +136,8 @@ fn process_samples(
     let left_channel = &mut data.0.0;
     let right_channel = &mut data.0.1;
     // TODO: change name of modified sample rate
-    // Force minimum reconstructed frequency to 10 hz
-    let sample_rate = (data.1.rate as usize) / 10;
+    // Force minimum reconstructed frequency to 20 hz
+    let sample_rate = (data.1.rate as usize) / 20;
 
     // It's better to add the offset between channels as silence here
     // For the original signal, silence is added to the end, while the
