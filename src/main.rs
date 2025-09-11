@@ -12,7 +12,7 @@ use symphonia::{core, default};
 const INPUT_DIR: &str = "./inputs/";
 const OUTPUT_DIR: &str = "./outputs/";
 
-type AudioMatrix = ((Vec<f64>, Vec<f64>), u32);
+type AudioMatrix = ((Vec<f32>, Vec<f32>), u32);
 fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, core::errors::Error> {
     // TODO: check updated example code for Symphonia dev-0.6.0
     // Numbers are from the Symphonia basic proceedures in its docs.rs
@@ -44,8 +44,8 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, core::e
 
     let track_id = track.id;
 
-    let mut left_samples: Vec<f64> = vec![];
-    let mut right_samples: Vec<f64> = vec![];
+    let mut left_samples: Vec<f32> = vec![];
+    let mut right_samples: Vec<f32> = vec![];
 
     let mut sample_buf = None;
     let mut meta_spec = 0;
@@ -63,7 +63,7 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, core::e
 
                         let duration = audio_buf.capacity() as u64;
 
-                        sample_buf = Some(core::audio::SampleBuffer::<f64>::new(duration, spec));
+                        sample_buf = Some(core::audio::SampleBuffer::<f32>::new(duration, spec));
                     }
 
                     if let Some(buf) = &mut sample_buf {
@@ -118,7 +118,7 @@ fn next_fast_fft(rate: usize) -> usize {
     }
 }
 
-fn window(n: usize, rate: usize) -> f64 {
+fn window(n: usize, rate: usize) -> f32 {
     // Windowing is used to make the signal fade in and out
     //   to prevent discontinuities, which causes spectral leakage (noise tuned to the music).
     // This function uses the Hann window, which is unoptimized but good enough for most sounds.
@@ -127,16 +127,16 @@ fn window(n: usize, rate: usize) -> f64 {
 
     // If we wanted this to be continuous, do (n % rate) to ensure discontinuities
     // I.e. window(47999, 48000) == window(48000, 48000) == 0.0
-    (std::f64::consts::PI * n as f64 / (rate - 1) as f64)
+    (std::f32::consts::PI * n as f32 / (rate - 1) as f32)
         .sin()
         .powi(2)
 }
 
 fn process_samples(
-    planner: &mut RealFftPlanner<f64>,
-    data: (Vec<f64>, Vec<f64>),
+    planner: &mut RealFftPlanner<f32>,
+    data: (Vec<f32>, Vec<f32>),
     rate: u32,
-) -> (Vec<f64>, Vec<f64>) {
+) -> (Vec<f32>, Vec<f32>) {
     let mut left_channel = data.0;
     let mut right_channel = data.1;
     // TODO: change name of modified sample rate
@@ -148,7 +148,7 @@ fn process_samples(
     //   offset signal's silence is added to the beginning
     let original_length = left_channel.len();
     let offset = sample_rate / 2; // If using 20 hz, 44.1khz gives 1102.5 samples. Probably insignificant?
-    let offset_vec = vec![0.0_f64; offset];
+    let offset_vec = vec![0.0_f32; offset];
     let mut not_left_channel = offset_vec.clone();
     let mut not_right_channel = offset_vec.clone();
     not_left_channel.append(&mut left_channel.clone());
@@ -159,7 +159,7 @@ fn process_samples(
 
     // Best to do a small FFT to prevent transient smearing
     let fft_size = next_fast_fft(sample_rate);
-    let recip_fft = (fft_size as f64).recip();
+    let recip_fft = (fft_size as f32).recip();
     let r2c = planner.plan_fft_forward(fft_size);
     let c2r = planner.plan_fft_inverse(fft_size);
     let fft_complex_size = r2c.complex_len();
@@ -176,7 +176,7 @@ fn process_samples(
     // Chunks idk
     let window = (0..sample_rate)
         .map(|s| window(s, sample_rate))
-        .collect::<Vec<f64>>();
+        .collect::<Vec<f32>>();
 
     // Failed attempt at reducing memory footprint
     let left_channel = left_channel.chunks_exact(sample_rate);
@@ -191,10 +191,17 @@ fn process_samples(
 
     // Saving samples for later
     // TODO: check if Vec::with_capacity(fft_total); is faster than .clone();
-    let mut processed_left: Vec<f64> = Vec::with_capacity(fft_total);
-    let mut processed_right: Vec<f64> = Vec::with_capacity(fft_total);
-    let mut processed_not_left: Vec<f64> = Vec::with_capacity(fft_total);
-    let mut processed_not_right: Vec<f64> = Vec::with_capacity(fft_total);
+    let mut processed_left: Vec<f32> = Vec::with_capacity(fft_total);
+    let mut processed_right: Vec<f32> = Vec::with_capacity(fft_total);
+    let mut processed_not_left: Vec<f32> = Vec::with_capacity(fft_total);
+    let mut processed_not_right: Vec<f32> = Vec::with_capacity(fft_total);
+
+    // Create scratch FFT for RealFFT
+    // RealFFT uses RustFFT's .process_with_scratch() for its .process() function
+    let mut left_fft = r2c.make_output_vec();
+    let mut right_fft = r2c.make_output_vec();
+    let mut not_left_fft = r2c.make_output_vec();
+    let mut not_right_fft = r2c.make_output_vec();
 
     for chunk in left_channel
         .zip(right_channel)
@@ -219,13 +226,6 @@ fn process_samples(
         not_left.resize(fft_size, 0.0);
         not_right.resize(fft_size, 0.0);
 
-        // Create scratch FFT for RealFFT
-        // RealFFT uses RustFFT's .process_with_scratch() for its .process() function
-        let mut left_fft = r2c.make_output_vec();
-        let mut right_fft = r2c.make_output_vec();
-        let mut not_left_fft = r2c.make_output_vec();
-        let mut not_right_fft = r2c.make_output_vec();
-
         // Ignore errors by RealFFT
         // RustFFT does not return a Result after processing,
         //   but RealFFT does return Results due to some zero-check
@@ -243,35 +243,51 @@ fn process_samples(
         not_right_fft[0] = new_dc;
 
         for index in 1..fft_complex_size {
-            let left_r = left_fft[index].norm();
-            let right_r = right_fft[index].norm();
-            let not_left_r = not_left_fft[index].norm();
-            let not_right_r = not_right_fft[index].norm();
+            // Align the phase of the left and right channels using the circular mean / true midpoint
+            // Higher weight towards higher magnitude, so the channel with the higher magnitude doesn't rotate much,
+            //   while the smaller magnitude channel may rotate a lot
 
-            // TODO: doing atan2 is expensive. is there something better?
-            // Align the phase of the left and right channels using the circular mean
-            // Usually, the side with the greater magnitude to not rotate much while the lesser one rotates more
-            // The regular mean would make both sides rotate equally, which seems to cause issues among FFTs
-            let phase = (left_fft[index].im + right_fft[index].im)
-                .atan2(left_fft[index].re + right_fft[index].re);
-            let not_phase = (not_left_fft[index].im + not_right_fft[index].im)
-                .atan2(not_left_fft[index].re + not_right_fft[index].re);
+            // Circular mean / true midpoint
+            let sum = left_fft[index] + right_fft[index];
+            let not_sum = not_left_fft[index] + not_right_fft[index];
 
-            left_fft[index] = num_complex::Complex::from_polar(left_r, phase);
-            right_fft[index] = num_complex::Complex::from_polar(right_r, phase);
-            not_left_fft[index] = num_complex::Complex::from_polar(not_left_r, not_phase);
-            not_right_fft[index] = num_complex::Complex::from_polar(not_right_r, not_phase);
+            // Squares without .sqrt until later
+            let sum_norm = sum.norm_sqr();
+            let left_sqr = left_fft[index].norm_sqr();
+            let right_sqr = right_fft[index].norm_sqr();
+            let not_sum_norm = not_sum.norm_sqr();
+            let not_left_sqr = not_left_fft[index].norm_sqr();
+            let not_right_sqr = not_right_fft[index].norm_sqr();
+
+            // Ensure no division by zero or similar
+            if sum_norm.recip().is_normal() {
+                // Equivalent to using cos-sin of atan2(sum)
+                left_fft[index] = sum.scale((left_sqr / sum_norm).sqrt());
+                right_fft[index] = sum.scale((right_sqr / sum_norm).sqrt());
+            } else {
+                // If there would be a problem, emulate atan2 and collapse to x-axis (which would be Re)
+                // TODO: check alternatives (angle inbetween, replicate left channel)
+                left_fft[index].re = left_sqr.sqrt();
+                left_fft[index].im = 0.0;
+                right_fft[index].re = right_sqr.sqrt();
+                right_fft[index].im = 0.0;
+            }
+            // ^
+            if not_sum_norm.recip().is_normal() {
+                not_left_fft[index] = not_sum.scale((not_left_sqr / not_sum_norm).sqrt());
+                not_right_fft[index] = not_sum.scale((not_right_sqr / not_sum_norm).sqrt());
+            } else {
+                not_left_fft[index].re = not_left_sqr.sqrt();
+                not_left_fft[index].im = 0.0;
+                not_right_fft[index].re = not_right_sqr.sqrt();
+                not_right_fft[index].im = 0.0;
+            }
         }
 
         let _ = c2r.process(&mut left_fft, &mut left);
         let _ = c2r.process(&mut right_fft, &mut right);
         let _ = c2r.process(&mut not_left_fft, &mut not_left);
         let _ = c2r.process(&mut not_right_fft, &mut not_right);
-
-        drop(left_fft);
-        drop(right_fft);
-        drop(not_left_fft);
-        drop(not_right_fft);
 
         // FFT zero-padding is ignored with this `for`` loop
         for index in 0..sample_rate {
@@ -288,6 +304,11 @@ fn process_samples(
             processed_not_right.push(new_not_right);
         }
     }
+
+    drop(left_fft);
+    drop(right_fft);
+    drop(not_left_fft);
+    drop(not_right_fft);
     drop(r2c);
     drop(c2r);
 
@@ -305,8 +326,8 @@ fn process_samples(
 
     // Remove overall DC after all local DC was removed
     // DC is just the average of the whole signal
-    let left_dc = processed_left.clone().iter().sum::<f64>() / original_length as f64;
-    let right_dc = processed_right.clone().iter().sum::<f64>() / original_length as f64;
+    let left_dc = processed_left.clone().iter().sum::<f32>() / original_length as f32;
+    let right_dc = processed_right.clone().iter().sum::<f32>() / original_length as f32;
     for index in 0..original_length {
         processed_left[index] -= left_dc;
         processed_right[index] -= right_dc;
@@ -325,6 +346,7 @@ fn process_samples(
         .fold(0.0, |acc, s| acc + s * s);
     // First square root is to get the multiplier when applied to s^2,
     //   second square root is to get the multiplier when applied to just s.
+    // f32 imprecision makes the true value differ by about ~0.01dB up and down
     let equalizer = (left_s / right_s).sqrt().sqrt();
 
     for index in 0..original_length {
@@ -336,7 +358,7 @@ fn process_samples(
     (processed_left, processed_right)
 }
 
-fn save_audio(file_path: &std::path::Path, audio: (Vec<f64>, Vec<f64>), rate: u32) {
+fn save_audio(file_path: &std::path::Path, audio: (Vec<f32>, Vec<f32>), rate: u32) {
     // TODO: add simple functionality for mono signals?
     // Might be a lot of work for something you can re-render to stereo in foobar2000
     let spec = hound::WavSpec {
@@ -348,10 +370,10 @@ fn save_audio(file_path: &std::path::Path, audio: (Vec<f64>, Vec<f64>), rate: u3
     let mut writer = hound::WavWriter::create(file_path, spec).expect("Could not create writer");
     for index in 0..audio.0.len() {
         writer
-            .write_sample(audio.0[index] as f32)
+            .write_sample(audio.0[index])
             .expect("Could not write sample");
         writer
-            .write_sample(audio.1[index] as f32)
+            .write_sample(audio.1[index])
             .expect("Could not write sample");
     }
     writer.finalize().expect("Could not finalize WAV file");
@@ -399,7 +421,7 @@ fn main() -> Result<(), core::errors::Error> {
 
     println!("File setup time: {:#?}", time.elapsed());
 
-    let mut real_planner = RealFftPlanner::<f64>::new();
+    let mut real_planner = RealFftPlanner::<f32>::new();
     for entry in entries {
         println!("Found file: {}", entry.display());
         let mut output_path = path::PathBuf::new();
@@ -407,7 +429,7 @@ fn main() -> Result<(), core::errors::Error> {
         output_path.push(OUTPUT_DIR);
         output_path.push(unprefix_output);
 
-        let channels: (Vec<f64>, Vec<f64>);
+        let channels: (Vec<f32>, Vec<f32>);
         let sample_rate: u32;
         print!("    Decoding...");
         io::stdout().flush()?; // Show print instantly
