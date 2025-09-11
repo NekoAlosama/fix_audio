@@ -31,5 +31,14 @@ Known problems which I kinda plan on fixing:
   * Can't really fix?
 * Make code more idiomatic 
 * Make code faster
-  * Multithreading, probably
+  * Benchmarks on my laptop:
+    * Ground-Zero - "Consume Red" (421MB 16-bit .flac, then 1.12GB 32-bit-floating-point .wav, done twice):
+      * both files decode to and are saved using 2.26GB of memory (likely because of 32-bit-floating -> 64-bit-floating)
+      * .flac took ~27.5s and used 13.02GB while processing
+      * .wav took ~32.5s and used 11.27GB while processing
+      * ideal memory while processing should be ~8.96GB? (64-bit data + not_data + processed_data + processed_not_data + fft setup)
+        * .wav has a fifth copy somewhere, .flac almost has a sixth copy somewhere?
+  * Focus on memory bottleneck first, then multithread. If I can't multithread, next spot would be to optimize atan2.
 * and more...
+
+![flamegraph](flamegraph.svg)
