@@ -74,6 +74,7 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, core::e
                         right_samples.reserve(reservation);
 
                         for sample in buf.samples().chunks_exact(2) {
+                            assert!(sample.len() >= 2);
                             left_samples.push(sample[0]);
                             right_samples.push(sample[1]);
                         }
@@ -86,7 +87,6 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, core::e
             }
         }
     }
-
     Ok(((left_samples, right_samples), meta_spec))
 }
 
@@ -95,26 +95,15 @@ fn next_fast_fft(rate: usize) -> usize {
     // RustFFT likes FFT lengths which are powers of 2 multiplied with powers of 3
     // We'll zero-pad the seconds anyway
     match rate {
-        // 20 hz
-        2205 => 2304,
-        2400 => 2592,
-        // 4800 => 5184 // appears later in 10 hz
-
-        // 15 hz
-        2940 => 3072,
-        3200 => 3456,
-        6400 => 6561,
-
-        // 10 hz
-        4410 => 4608,
-        4800 => 5184, // also 20 hz for 96khz
-        9600 => 10368,
-
-        // 1 hz
-        44100 => 46656,
-        48000 => 49152,
-        96000 => 98304,
-        _ => 0,
+        // Sample rate is divided by 20
+        // Commented values are currently unsupported by Symphonia
+        2205 => 2304, // 44100
+        2400 => 2592, // 48000
+        // 4410 => 4608,  // 88200
+        4800 => 5184, // 96000
+        // 8820 => 9216,  // 176400
+        // 9600 => 10368, // 192000
+        _ => unimplemented!(),
     }
 }
 
@@ -136,26 +125,12 @@ fn process_samples(
     planner: &mut RealFftPlanner<f32>,
     data: (Vec<f32>, Vec<f32>),
     rate: u32,
-) -> (Vec<f32>, Vec<f32>) {
+) -> (Box<[f32]>, Box<[f32]>) {
     let mut left_channel = data.0;
     let mut right_channel = data.1;
     // TODO: change name of modified sample rate
     // Force minimum reconstructed frequency to 20 hz
     let sample_rate = rate as usize / 20;
-
-    // It's better to add the offset between channels as silence here
-    // For the original signal, silence is added to the end, while the
-    //   offset signal's silence is added to the beginning
-    let original_length = left_channel.len();
-    let offset = sample_rate / 2; // If using 20 hz, 44.1khz gives 1102.5 samples. Probably insignificant?
-    let offset_vec = vec![0.0_f32; offset];
-    let mut not_left_channel = offset_vec.clone();
-    let mut not_right_channel = offset_vec.clone();
-    not_left_channel.append(&mut left_channel.clone());
-    not_right_channel.append(&mut right_channel.clone());
-    left_channel.resize(original_length + offset, 0.0);
-    right_channel.resize(original_length + offset, 0.0);
-    debug_assert_eq!(left_channel.len(), not_right_channel.len());
 
     // Best to do a small FFT to prevent transient smearing
     let fft_size = next_fast_fft(sample_rate);
@@ -164,6 +139,30 @@ fn process_samples(
     let c2r = planner.plan_fft_inverse(fft_size);
     let fft_complex_size = r2c.complex_len();
 
+    // The first bin is the DC bin, which is the average unheard noise
+    // From what we've seen, this should be a real number (C + 0.0i), but it's better to be safe
+    //   by zeroing it out in both axes
+    let new_dc = num_complex::Complex::zero();
+
+    // Pre-calculate window function
+    let window = (0..sample_rate)
+        .map(|s| window(s, sample_rate))
+        .collect::<Vec<f32>>();
+
+    // It's better to add the offset between channels as silence here
+    // For the original signal, silence is added to the end, while the
+    //   offset signal's silence is added to the beginning
+    let original_length = left_channel.len();
+    let original_length_inv = (original_length as f32).recip();
+    let offset = sample_rate >> 1; // If using 20 hz, 44.1khz gives 1102.5 samples. Probably insignificant?
+    let offset_vec = vec![0.0_f32; offset];
+    let mut not_left_channel = offset_vec.clone();
+    let mut not_right_channel = offset_vec.clone();
+    not_left_channel.append(&mut left_channel.clone());
+    not_right_channel.append(&mut right_channel.clone());
+    left_channel.resize(original_length + offset, 0.0);
+    right_channel.resize(original_length + offset, 0.0);
+
     // The algorithm I want to use will chunk each signal by sample_rate, so it's better to round up
     //   to the next multiple so we can use ChunksExact and have no remainder
     let fft_total = left_channel.len().next_multiple_of(sample_rate);
@@ -171,30 +170,28 @@ fn process_samples(
     right_channel.resize(fft_total, 0.0);
     not_left_channel.resize(fft_total, 0.0);
     not_right_channel.resize(fft_total, 0.0);
-    debug_assert_eq!(left_channel.len() % sample_rate, 0);
 
-    // Chunks idk
-    let window = (0..sample_rate)
-        .map(|s| window(s, sample_rate))
-        .collect::<Vec<f32>>();
-
-    // Failed attempt at reducing memory footprint
+    // Turning the Vec's into Box'es will shrink them and prevent further allocations and mutations
+    let left_channel = left_channel.into_boxed_slice();
+    let right_channel = right_channel.into_boxed_slice();
+    let not_left_channel = not_left_channel.into_boxed_slice();
+    let not_right_channel = not_right_channel.into_boxed_slice();
+    // Chunking for later
     let left_channel = left_channel.chunks_exact(sample_rate);
     let right_channel = right_channel.chunks_exact(sample_rate);
     let not_left_channel = not_left_channel.chunks_exact(sample_rate);
     let not_right_channel = not_right_channel.chunks_exact(sample_rate);
 
-    // The first bin is the DC bin, which is the average unheard noise
-    // From what we've seen, this should be a real number (C + 0.0i), but it's better to be safe
-    //   by zeroing it out in both axes
-    let new_dc = num_complex::Complex::zero();
-
     // Saving samples for later
-    // TODO: check if Vec::with_capacity(fft_total); is faster than .clone();
-    let mut processed_left: Vec<f32> = Vec::with_capacity(fft_total);
-    let mut processed_right: Vec<f32> = Vec::with_capacity(fft_total);
-    let mut processed_not_left: Vec<f32> = Vec::with_capacity(fft_total);
-    let mut processed_not_right: Vec<f32> = Vec::with_capacity(fft_total);
+    // I used Vec::with_capacity() before, but I think reserve_exact might be better for memory
+    let mut processed_left: Vec<f32> = vec![];
+    let mut processed_right: Vec<f32> = vec![];
+    let mut processed_not_left: Vec<f32> = vec![];
+    let mut processed_not_right: Vec<f32> = vec![];
+    processed_left.reserve_exact(fft_total);
+    processed_right.reserve_exact(fft_total);
+    processed_not_left.reserve_exact(fft_total);
+    processed_not_right.reserve_exact(fft_total);
 
     // Create scratch FFT for RealFFT
     // RealFFT uses RustFFT's .process_with_scratch() for its .process() function
@@ -212,6 +209,10 @@ fn process_samples(
         let mut not_left = chunk.1.0.to_vec();
         let mut not_right = chunk.1.1.to_vec();
 
+        assert!(left.len() >= sample_rate);
+        assert!(right.len() >= sample_rate);
+        assert!(not_left.len() >= sample_rate);
+        assert!(not_right.len() >= sample_rate);
         for index in 0..sample_rate {
             let window_multiplier = window[index];
             left[index] *= window_multiplier;
@@ -221,6 +222,8 @@ fn process_samples(
         }
 
         // Zero-pad signal for FFT
+        // It's probably fine not to shrink these, since they're rather small and would reallocate
+        //   in this hot loop
         left.resize(fft_size, 0.0);
         right.resize(fft_size, 0.0);
         not_left.resize(fft_size, 0.0);
@@ -235,6 +238,11 @@ fn process_samples(
         let _ = r2c.process(&mut right, &mut right_fft);
         let _ = r2c.process(&mut not_left, &mut not_left_fft);
         let _ = r2c.process(&mut not_right, &mut not_right_fft);
+
+        assert!(left_fft.len() >= fft_complex_size);
+        assert!(right_fft.len() >= fft_complex_size);
+        assert!(not_left_fft.len() >= fft_complex_size);
+        assert!(not_right_fft.len() >= fft_complex_size);
 
         // Remove local DC offset
         left_fft[0] = new_dc;
@@ -252,35 +260,52 @@ fn process_samples(
             let not_sum = not_left_fft[index] + not_right_fft[index];
 
             // Squares without .sqrt until later
-            let sum_norm = sum.norm_sqr();
+            let sum_sqr_inv = sum.norm_sqr().recip();
             let left_sqr = left_fft[index].norm_sqr();
             let right_sqr = right_fft[index].norm_sqr();
-            let not_sum_norm = not_sum.norm_sqr();
+            let not_sum_sqr_inv = not_sum.norm_sqr().recip();
             let not_left_sqr = not_left_fft[index].norm_sqr();
             let not_right_sqr = not_right_fft[index].norm_sqr();
 
             // Ensure no division by zero or similar
-            if sum_norm.recip().is_normal() {
+            if sum_sqr_inv.is_normal() {
                 // Equivalent to using cos-sin of atan2(sum)
-                left_fft[index] = sum.scale((left_sqr / sum_norm).sqrt());
-                right_fft[index] = sum.scale((right_sqr / sum_norm).sqrt());
+                left_fft[index] = sum.scale((left_sqr * sum_sqr_inv).sqrt());
+                right_fft[index] = sum.scale((right_sqr * sum_sqr_inv).sqrt());
             } else {
-                // If there would be a problem, emulate atan2 and collapse to x-axis (which would be Re)
-                // TODO: check alternatives (angle inbetween, replicate left channel)
-                left_fft[index].re = left_sqr.sqrt();
-                left_fft[index].im = 0.0;
-                right_fft[index].re = right_sqr.sqrt();
-                right_fft[index].im = 0.0;
+                let sum_norm_inv = sum_sqr_inv.sqrt();
+                let left_norm = left_sqr.sqrt();
+                let right_norm = right_sqr.sqrt();
+                // Unsure if doing the square root would help
+                if sum_norm_inv.is_normal() {
+                    left_fft[index] = sum.scale(left_norm * sum_norm_inv);
+                    right_fft[index] = sum.scale(right_norm * sum_norm_inv);
+                } else {
+                    // If there would be a problem, emulate atan2 and collapse to x-axis (which would be Re)
+                    // TODO: check alternatives (angle inbetween, replicate left channel)
+                    left_fft[index].re = left_norm;
+                    left_fft[index].im = 0.0;
+                    right_fft[index].re = right_norm;
+                    right_fft[index].im = 0.0;
+                }
             }
             // ^
-            if not_sum_norm.recip().is_normal() {
-                not_left_fft[index] = not_sum.scale((not_left_sqr / not_sum_norm).sqrt());
-                not_right_fft[index] = not_sum.scale((not_right_sqr / not_sum_norm).sqrt());
+            if not_sum_sqr_inv.is_normal() {
+                not_left_fft[index] = not_sum.scale((not_left_sqr * not_sum_sqr_inv).sqrt());
+                not_right_fft[index] = not_sum.scale((not_right_sqr * not_sum_sqr_inv).sqrt());
             } else {
-                not_left_fft[index].re = not_left_sqr.sqrt();
-                not_left_fft[index].im = 0.0;
-                not_right_fft[index].re = not_right_sqr.sqrt();
-                not_right_fft[index].im = 0.0;
+                let not_sum_norm_inv = not_sum_sqr_inv.sqrt();
+                let not_left_norm = not_left_sqr.sqrt();
+                let not_right_norm = not_right_sqr.sqrt();
+                if not_sum_norm_inv.is_normal() {
+                    not_left_fft[index] = not_sum.scale(not_left_norm * not_sum_norm_inv);
+                    not_right_fft[index] = not_sum.scale(not_right_norm * not_sum_norm_inv);
+                } else {
+                    not_left_fft[index].re = not_left_norm;
+                    not_left_fft[index].im = 0.0;
+                    not_right_fft[index].re = not_right_norm;
+                    not_right_fft[index].im = 0.0;
+                }
             }
         }
 
@@ -291,17 +316,11 @@ fn process_samples(
 
         // FFT zero-padding is ignored with this `for`` loop
         for index in 0..sample_rate {
-            // Normalize FFT values
-            let new_left = left[index] * recip_fft;
-            let new_right = right[index] * recip_fft;
-            let new_not_left = not_left[index] * recip_fft;
-            let new_not_right = not_right[index] * recip_fft;
-
-            // FFT processing has finished
-            processed_left.push(new_left);
-            processed_right.push(new_right);
-            processed_not_left.push(new_not_left);
-            processed_not_right.push(new_not_right);
+            // Normalize FFT values to finish them off
+            processed_left.push(left[index] * recip_fft);
+            processed_right.push(right[index] * recip_fft);
+            processed_not_left.push(not_left[index] * recip_fft);
+            processed_not_right.push(not_right[index] * recip_fft);
         }
     }
 
@@ -311,6 +330,11 @@ fn process_samples(
     drop(not_right_fft);
     drop(r2c);
     drop(c2r);
+
+    assert!(processed_left.len() >= original_length);
+    assert!(processed_right.len() >= original_length);
+    assert!(processed_not_left.len() >= fft_total);
+    assert!(processed_not_right.len() >= fft_total);
 
     // Add the original and offset signals together to get the unwindowed level
     for index in 0..original_length {
@@ -323,11 +347,15 @@ fn process_samples(
     // Remove chunking zero-padding
     processed_left.truncate(original_length);
     processed_right.truncate(original_length);
+    processed_left.shrink_to(original_length);
+    processed_right.shrink_to(original_length);
 
+    assert!(processed_left.len() >= original_length);
+    assert!(processed_right.len() >= original_length);
     // Remove overall DC after all local DC was removed
     // DC is just the average of the whole signal
-    let left_dc = processed_left.clone().iter().sum::<f32>() / original_length as f32;
-    let right_dc = processed_right.clone().iter().sum::<f32>() / original_length as f32;
+    let left_dc = processed_left.clone().iter().sum::<f32>() * original_length_inv;
+    let right_dc = processed_right.clone().iter().sum::<f32>() * original_length_inv;
     for index in 0..original_length {
         processed_left[index] -= left_dc;
         processed_right[index] -= right_dc;
@@ -339,26 +367,30 @@ fn process_samples(
     let left_s = processed_left
         .clone()
         .iter()
-        .fold(0.0, |acc, s| acc + s * s);
+        .fold(0.0, |acc, s| s.mul_add(*s, acc));
     let right_s = processed_right
         .clone()
         .iter()
-        .fold(0.0, |acc, s| acc + s * s);
+        .fold(0.0, |acc, s| s.mul_add(*s, acc));
     // First square root is to get the multiplier when applied to s^2,
     //   second square root is to get the multiplier when applied to just s.
-    // f32 imprecision makes the true value differ by about ~0.01dB up and down
-    let equalizer = (left_s / right_s).sqrt().sqrt();
+    let left_equalizer = (right_s / left_s).powf(0.25);
+    let right_equalizer = (left_s / right_s).powf(0.25);
 
     for index in 0..original_length {
-        processed_left[index] /= equalizer;
-        processed_right[index] *= equalizer;
+        processed_left[index] *= left_equalizer;
+        processed_right[index] *= right_equalizer;
     }
 
     // Overall processing is done
-    (processed_left, processed_right)
+    // pack it up
+    (
+        processed_left.into_boxed_slice(),
+        processed_right.into_boxed_slice(),
+    )
 }
 
-fn save_audio(file_path: &std::path::Path, audio: (Vec<f32>, Vec<f32>), rate: u32) {
+fn save_audio(file_path: &std::path::Path, audio: (Box<[f32]>, Box<[f32]>), rate: u32) {
     // TODO: add simple functionality for mono signals?
     // Might be a lot of work for something you can re-render to stereo in foobar2000
     let spec = hound::WavSpec {
@@ -368,7 +400,11 @@ fn save_audio(file_path: &std::path::Path, audio: (Vec<f32>, Vec<f32>), rate: u3
         sample_format: hound::SampleFormat::Float,
     };
     let mut writer = hound::WavWriter::create(file_path, spec).expect("Could not create writer");
-    for index in 0..audio.0.len() {
+    let length = audio.0.len();
+
+    assert!(audio.0.len() >= length);
+    assert!(audio.1.len() >= length);
+    for index in 0..length {
         writer
             .write_sample(audio.0[index])
             .expect("Could not write sample");
@@ -442,7 +478,7 @@ fn main() -> Result<(), core::errors::Error> {
             }
             Err(core::errors::Error::IoError(err)) => {
                 if err.kind() == io::ErrorKind::UnexpectedEof {
-                    println!("  Invalid audio, sent to output.");
+                    println!("  Invalid or unsupported audio, sent to output.");
                     fs::create_dir_all(output_path.parent().unwrap())?;
                     fs::rename(entry, output_path)?;
                     continue;
@@ -452,7 +488,7 @@ fn main() -> Result<(), core::errors::Error> {
             }
             // Usually happens if Symphonia attempts to open a .jpg or .png
             Err(core::errors::Error::Unsupported(_) | core::errors::Error::DecodeError(_)) => {
-                println!("    Invalid audio, sent to output");
+                println!("    Invalid or unsupported audio, sent to output");
                 fs::create_dir_all(output_path.parent().unwrap())?;
                 fs::rename(entry, output_path)?;
                 continue;

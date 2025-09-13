@@ -17,27 +17,31 @@ Currently, this program takes in stereo audio files (input folder created on fir
 
 Non-audio files (covers, documents, etc.) are transfered to the output folder. The original audio files are kept in the input folder, so remember to delete them if you don't need to re-run the program with changes.
 
-## Issues
-Known problems which I kinda plan on fixing:
-* Does not support mono files
-  * Force upmixing to stereo?
-  * Make sure to bypass phase alignment
+## Reflection
+__Known problems I can't fix__:
+* Symphonia 0.5.4 doesn't support files above 96khz
+  * Fixed in dev-0.6 branch, but it's unstable.
 * Cannot copy tags from input to output (lack of ecosystem support?)
   * Symphonia only supports tag reading
   * hound does not support writing .wav Vorbis tags
 * FFT introduces relatively minor transient smearing / pre-echo
   * Problem tracks:
     * SOPHIE - "MSMSMSM": Transient hi-hat of <0.1s, right channel delayed by ~0.02s
-  * Can't really fix?
+* RMS average might differ by about 0.02dB between channels
+  * Probably due to f32 imprecision
+
+
+__Things to do__:
+* Add support for mono files
+  * Force upmixing to stereo?
+  * Make sure to bypass phase alignment
+* Add support for videos with an audio track (.webm, .mkv)
+  * Symphonia doesn't have a demuxer example/tutorial?
 * Make code more idiomatic 
-* Reduce memory footprint
-  * Benchmarks on my laptop:
-    * Ground-Zero - "Consume Red" (421MB 16-bit .flac, then 1.12GB 32-bit-floating-point .wav, done twice):
-      * both files decode to and are saved using 1.13GB of memory (expected result)
-      * current memory while processing should be 5x the decoded size (data, not_data, processed_data, processed_not_data, fft_data+fft_not_data)
-        * .wav uses 5x memory, while .flac has 5.77x memory while processing?
-        * don't know how to simplify otherwise
-  * Focus on memory bottleneck first, then multithread.
+* Increase program efficiency
+  * The current memory usage is good, so the main feature to implement is multithreading
+  * Speed is heavily dependent on decoding (I/O reading) and saving (I/O writing)
 * and more...
+
 
 ![flamegraph](flamegraph.svg)
