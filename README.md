@@ -27,8 +27,6 @@ __Known problems I can't fix__:
 * FFT introduces relatively minor transient smearing / pre-echo
   * Problem tracks:
     * SOPHIE - "MSMSMSM": Transient hi-hat of <0.1s, right channel delayed by ~0.02s
-* RMS average might differ by about 0.02dB between channels
-  * Probably due to f32 imprecision
 
 
 __Things to do__:
@@ -37,12 +35,12 @@ __Things to do__:
   * Make sure to bypass phase alignment
 * Add support for videos with an audio track (.webm, .mkv)
   * Symphonia doesn't have a demuxer example/tutorial?
-* Make code more idiomatic 
+* Make code more idiomatic
 * Increase program efficiency
   * The current memory usage is good, so the main feature to implement is multithreading
   * Main bottlenecks also seem to be Sympohonia decoding (I/O reading) and hound .wav file-saving (I/O writing)
   * Another improvement would be to set the program's priority class (Idle -> Above Normal) and I/O priority (Normal -> High)
-    * Approximate 50% speedup (90s to 60s on test suite) using System Informer
+    * Approximate 50% speedup (90s to 60s on test suite) using System Informer to apply priorities
 * and more...
 
 

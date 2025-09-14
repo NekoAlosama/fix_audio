@@ -175,7 +175,11 @@ fn process_samples(
     //   offset signal's silence is added to the beginning
     let original_length = left_channel.len();
     let original_length_inv = (original_length as f64).recip() as f32;
-    let offset = sample_rate >> 1; // If using 20 hz, 44.1khz gives 1102.5 samples. Probably insignificant?
+
+    // When using 20 hz, 44.1khz needs 1102.5 samples of silence, which becomes 1102.
+    // The effect is insignificant, giving a 0.0712% or 0.00618dB difference
+    let offset = sample_rate >> 1;
+
     let offset_vec = vec![0.0_f32; offset];
     let mut not_left_channel = offset_vec.clone();
     let mut not_right_channel = offset_vec;
@@ -388,6 +392,8 @@ fn process_samples(
     assert!(processed_right.len() >= original_length);
     // Remove overall DC after all local DC was removed
     // DC is just the average of the whole signal
+    // RMS averaging below needs f64 instead of f32, but this DC doesn't need it,
+    //   probably because each sample needs to be squared, reducing usable significant digits
     let left_dc = processed_left.clone().iter().sum::<f32>() * original_length_inv;
     let right_dc = processed_right.clone().iter().sum::<f32>() * original_length_inv;
     for index in 0..original_length {
@@ -397,23 +403,27 @@ fn process_samples(
 
     // Average out the RMS of the left and right channels
     // No need to divide by original_length to get the mean, nor take the square root,
-    //   since the divisions cancel out later and the square root is made later once
+    //   since the divisions cancel out later and the square roots are made later
+    // Cast from f32 to f64 used to prevent imprecision when adding lots of f32,
+    //   where channels would differ by about 0.02dB / 0.25%
     let left_s = processed_left
         .clone()
         .iter()
-        .fold(0.0, |acc, s| s.mul_add(*s, acc));
+        .fold(0.0_f64, |acc, s| f64::from(*s).mul_add(f64::from(*s), acc));
     let right_s = processed_right
         .clone()
         .iter()
-        .fold(0.0, |acc, s| s.mul_add(*s, acc));
+        .fold(0.0_f64, |acc, s| f64::from(*s).mul_add(f64::from(*s), acc));
     // First square root is to get the multiplier when applied to s^2,
     //   second square root is to get the multiplier when applied to just s.
-    let left_equalizer = (right_s / left_s).powf(0.25);
-    let right_equalizer = (left_s / right_s).powf(0.25);
-
+    // .sqrt().sqrt() is used over .powf(0.25) since .sqrt() uses infinite precision
+    let left_rms_sqrt = left_s.sqrt().sqrt();
+    let right_rms_sqrt = right_s.sqrt().sqrt();
+    let left_equalizer = right_rms_sqrt / left_rms_sqrt;
+    let right_equalizer = left_rms_sqrt / right_rms_sqrt;
     for index in 0..original_length {
-        processed_left[index] *= left_equalizer;
-        processed_right[index] *= right_equalizer;
+        processed_left[index] *= left_equalizer as f32;
+        processed_right[index] *= right_equalizer as f32;
     }
 
     // Overall processing is done
