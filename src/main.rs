@@ -1,20 +1,36 @@
+// General Clippy warnings
+#![warn(clippy::complexity)]
+#![warn(clippy::correctness)]
+#![warn(clippy::nursery)]
+#![warn(clippy::pedantic)]
+#![warn(clippy::perf)]
+#![warn(clippy::suspicious)]
+#![allow(clippy::cast_precision_loss)] // Allow u64 as f64, since we shouldn't really have u64 exceeding the 52-bit mantissa
+#![allow(clippy::cast_possible_truncation)] // Allow f64 as f32, since f64 takes double the memory of f32 and we can only write f32
+
 // Imports
-// Currently prefering to have one or two namespaces used in the functions
+// TODO: consider Clippy's style lints for imports
 use realfft::{RealFftPlanner, num_complex, num_traits::Zero};
 use std::{
     fs,
     io::{self, Write},
     path, time,
 };
-use symphonia::{core, default};
+use symphonia::{
+    core::{
+        self, codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStreamOptions,
+        meta::MetadataOptions,
+    },
+    default,
+};
 
 // Hard-coded directories
 const INPUT_DIR: &str = "./inputs/";
 const OUTPUT_DIR: &str = "./outputs/";
 
-type AudioMatrix = ((Vec<f32>, Vec<f32>), u32);
+type AudioMatrix = ((Vec<f32>, Vec<f32>), u32); // Seperated here due to Clippy lint
 fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, core::errors::Error> {
-    // TODO: check updated example code for Symphonia dev-0.6.0
+    // Based on Symphonia's docs.rs page and example code (mix of 0.5.4 and dev-0.6)
     // Numbers are from the Symphonia basic proceedures in its docs.rs
 
     // 1
@@ -24,15 +40,18 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, core::e
 
     // 3
     // 4
-    let mss = core::io::MediaSourceStream::new(Box::new(fs::File::open(path)?), Default::default());
+    let mss = core::io::MediaSourceStream::new(
+        Box::new(fs::File::open(path)?),
+        MediaSourceStreamOptions::default(),
+    );
 
     // 5
     // 6
     let probe_result = probe.format(
         core::probe::Hint::new().with_extension("flac"),
         mss,
-        &Default::default(),
-        &Default::default(),
+        &FormatOptions::default(),
+        &MetadataOptions::default(),
     )?;
     let mut format = probe_result.format;
 
@@ -40,7 +59,7 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, core::e
     let track = format.default_track().unwrap();
 
     // 8
-    let mut decoder = code_registry.make(&track.codec_params, &Default::default())?;
+    let mut decoder = code_registry.make(&track.codec_params, &DecoderOptions::default())?;
 
     let track_id = track.id;
 
@@ -96,7 +115,8 @@ fn next_fast_fft(rate: usize) -> usize {
     // We'll zero-pad the seconds anyway
     match rate {
         // Sample rate is divided by 20
-        // Commented values are currently unsupported by Symphonia
+        // Commented values are currently unsupported by Symphonia 0.5.4
+        //   but are expected to be supported in dev-0.6
         2205 => 2304, // 44100
         2400 => 2592, // 48000
         // 4410 => 4608,  // 88200
@@ -107,20 +127,24 @@ fn next_fast_fft(rate: usize) -> usize {
     }
 }
 
-fn window(n: usize, rate: usize) -> f32 {
-    // Windowing is used to make the signal fade in and out
+fn window(rate: usize) -> Box<[f32]> {
+    // Windowing is used to make the signal chunk fade in and out
     //   to prevent discontinuities, which causes spectral leakage (noise tuned to the music).
-    // This function uses the Hann window, which is unoptimized but good enough for most sounds.
-    // One benefit is that window(n) + window(n + rate/2) == 1.0, so we get back to the original
-    //   level of the input if we overlap two FFTs with this offset between them.
-
-    // If we wanted this to be continuous, do (n % rate) to ensure discontinuities
-    // I.e. window(47999, 48000) == window(48000, 48000) == 0.0
-    (std::f32::consts::PI * n as f32 / (rate - 1) as f32)
-        .sin()
-        .powi(2)
+    // This function uses the Hann window, which is considered to be a jack-of-all-trades.
+    // One useful property is that 50% overlapping (i.e. window(n) + window(n + rate/2)) == 1.0, so
+    //   we get back to the original level of the input if we overlap two FFTs with this offset between them.
+    // Note that window(0, rate) == 0.0 and window(rate - 1, rate) == window(1, rate) != 0.0, so the only zero point is at n == 0.
+    //   This is to satisfy some periodicity property/implication, rather than both ends being 0.0
+    (0..rate)
+        .map(|n| {
+            (std::f64::consts::PI * n as f64 / rate as f64)
+                .sin()
+                .powi(2) as f32
+        })
+        .collect()
 }
 
+// TODO: break up into smaller functions
 fn process_samples(
     planner: &mut RealFftPlanner<f32>,
     data: (Vec<f32>, Vec<f32>),
@@ -128,13 +152,12 @@ fn process_samples(
 ) -> (Box<[f32]>, Box<[f32]>) {
     let mut left_channel = data.0;
     let mut right_channel = data.1;
-    // TODO: change name of modified sample rate
     // Force minimum reconstructed frequency to 20 hz
     let sample_rate = rate as usize / 20;
 
     // Best to do a small FFT to prevent transient smearing
     let fft_size = next_fast_fft(sample_rate);
-    let recip_fft = (fft_size as f32).recip();
+    let recip_fft = (fft_size as f64).recip() as f32;
     let r2c = planner.plan_fft_forward(fft_size);
     let c2r = planner.plan_fft_inverse(fft_size);
     let fft_complex_size = r2c.complex_len();
@@ -145,19 +168,17 @@ fn process_samples(
     let new_dc = num_complex::Complex::zero();
 
     // Pre-calculate window function
-    let window = (0..sample_rate)
-        .map(|s| window(s, sample_rate))
-        .collect::<Vec<f32>>();
+    let window = window(sample_rate);
 
     // It's better to add the offset between channels as silence here
     // For the original signal, silence is added to the end, while the
     //   offset signal's silence is added to the beginning
     let original_length = left_channel.len();
-    let original_length_inv = (original_length as f32).recip();
+    let original_length_inv = (original_length as f64).recip() as f32;
     let offset = sample_rate >> 1; // If using 20 hz, 44.1khz gives 1102.5 samples. Probably insignificant?
     let offset_vec = vec![0.0_f32; offset];
     let mut not_left_channel = offset_vec.clone();
-    let mut not_right_channel = offset_vec.clone();
+    let mut not_right_channel = offset_vec;
     not_left_channel.append(&mut left_channel.clone());
     not_right_channel.append(&mut right_channel.clone());
     left_channel.resize(original_length + offset, 0.0);
@@ -183,7 +204,7 @@ fn process_samples(
     let not_right_channel = not_right_channel.chunks_exact(sample_rate);
 
     // Saving samples for later
-    // I used Vec::with_capacity() before, but I think reserve_exact might be better for memory
+    // .reserve_exact() reduces memory by preventing over-allocation
     let mut processed_left: Vec<f32> = vec![];
     let mut processed_right: Vec<f32> = vec![];
     let mut processed_not_left: Vec<f32> = vec![];
@@ -276,13 +297,21 @@ fn process_samples(
                 let sum_norm_inv = sum_sqr_inv.sqrt();
                 let left_norm = left_sqr.sqrt();
                 let right_norm = right_sqr.sqrt();
-                // Unsure if doing the square root would help
+                // Check if the division by close-to-zero is recoverable by taking the square root
                 if sum_norm_inv.is_normal() {
                     left_fft[index] = sum.scale(left_norm * sum_norm_inv);
                     right_fft[index] = sum.scale(right_norm * sum_norm_inv);
+                } else if left_fft[index].re.abs() < left_fft[index].im.abs() {
+                    // If there would be a division by zero, the sum coordinate is near the origin of 0.0 + 0.0i, so
+                    //   the left and right channels are either silence or are completely out-of-phase
+                    // This block makes the channels land on the Im axis if the Re coordinate is small
+                    left_fft[index].re = 0.0;
+                    left_fft[index].im = left_norm;
+                    right_fft[index].re = 0.0;
+                    right_fft[index].im = right_norm;
                 } else {
-                    // If there would be a problem, emulate atan2 and collapse to x-axis (which would be Re)
-                    // TODO: check alternatives (angle inbetween, replicate left channel)
+                    // aka left_fft[index].im.abs() <= left_fft[index].re.abs(),
+                    //   so we should land on the Re axis. This emulates the behavior of .atan2() where the angle is 0 radians
                     left_fft[index].re = left_norm;
                     left_fft[index].im = 0.0;
                     right_fft[index].re = right_norm;
@@ -300,6 +329,11 @@ fn process_samples(
                 if not_sum_norm_inv.is_normal() {
                     not_left_fft[index] = not_sum.scale(not_left_norm * not_sum_norm_inv);
                     not_right_fft[index] = not_sum.scale(not_right_norm * not_sum_norm_inv);
+                } else if not_left_fft[index].re.abs() < not_left_fft[index].im.abs() {
+                    not_left_fft[index].re = 0.0;
+                    not_left_fft[index].im = not_left_norm;
+                    not_right_fft[index].re = 0.0;
+                    not_right_fft[index].im = not_right_norm;
                 } else {
                     not_left_fft[index].re = not_left_norm;
                     not_left_fft[index].im = 0.0;
@@ -390,7 +424,7 @@ fn process_samples(
     )
 }
 
-fn save_audio(file_path: &std::path::Path, audio: (Box<[f32]>, Box<[f32]>), rate: u32) {
+fn save_audio(file_path: &std::path::Path, audio: &(Box<[f32]>, Box<[f32]>), rate: u32) {
     // TODO: add simple functionality for mono signals?
     // Might be a lot of work for something you can re-render to stereo in foobar2000
     let spec = hound::WavSpec {
@@ -416,7 +450,8 @@ fn save_audio(file_path: &std::path::Path, audio: (Box<[f32]>, Box<[f32]>), rate
 }
 
 fn get_paths(directory: path::PathBuf) -> io::Result<Vec<path::PathBuf>> {
-    // Recursive file path retriever
+    // Recursive file path retriever from StackOverflow
+    // TODO: check if there's a newer std function or crate to do this
     let mut entries: Vec<path::PathBuf> = vec![];
     let folder_read = fs::read_dir(directory)?;
 
@@ -455,11 +490,13 @@ fn main() -> Result<(), core::errors::Error> {
     // Get list of files in INPUT_DIR
     let entries: Vec<path::PathBuf> = get_paths(INPUT_DIR.into())?;
 
-    println!("File setup time: {:#?}", time.elapsed());
-
     let mut real_planner = RealFftPlanner::<f32>::new();
+
+    println!("Setup and file-exploring time: {:#?}", time.elapsed());
     for entry in entries {
         println!("Found file: {}", entry.display());
+        print!("    Decoding...");
+        io::stdout().flush()?; // Show print instantly
         let mut output_path = path::PathBuf::new();
         let unprefix_output = entry.strip_prefix(INPUT_DIR).unwrap();
         output_path.push(OUTPUT_DIR);
@@ -467,8 +504,6 @@ fn main() -> Result<(), core::errors::Error> {
 
         let channels: (Vec<f32>, Vec<f32>);
         let sample_rate: u32;
-        print!("    Decoding...");
-        io::stdout().flush()?; // Show print instantly
         // If we can't properly decode the data, it's likely not audio data
         // In this case, we just send it to OUTPUT_DIR so it's not spitting the warning every run
         match get_samples_and_metadata(&entry) {
@@ -476,25 +511,24 @@ fn main() -> Result<(), core::errors::Error> {
                 channels = data.0;
                 sample_rate = data.1;
             }
+            // The following errors usually happen if Symphonia attempts to open a .jpg or .png
             Err(core::errors::Error::IoError(err)) => {
                 if err.kind() == io::ErrorKind::UnexpectedEof {
                     println!("  Invalid or unsupported audio, sent to output.");
                     fs::create_dir_all(output_path.parent().unwrap())?;
                     fs::rename(entry, output_path)?;
                     continue;
-                } else {
-                    return Err(core::errors::Error::IoError(err));
                 }
+                return Err(core::errors::Error::IoError(err)); // Except here, where an actual audio file failed decoding
             }
-            // Usually happens if Symphonia attempts to open a .jpg or .png
             Err(core::errors::Error::Unsupported(_) | core::errors::Error::DecodeError(_)) => {
                 println!("    Invalid or unsupported audio, sent to output");
                 fs::create_dir_all(output_path.parent().unwrap())?;
                 fs::rename(entry, output_path)?;
                 continue;
             }
-            Err(other) => return Err(other),
-        };
+            Err(other) => return Err(other), // some other unknown error
+        }
 
         print!("    Processing... ");
         io::stdout().flush()?;
@@ -504,7 +538,7 @@ fn main() -> Result<(), core::errors::Error> {
         io::stdout().flush()?;
         output_path.set_extension("wav");
         fs::create_dir_all(output_path.parent().unwrap())?;
-        save_audio(&output_path, modified_audio, sample_rate);
+        save_audio(&output_path, &modified_audio, sample_rate);
 
         println!("    T+{:#?} ", time.elapsed());
     }

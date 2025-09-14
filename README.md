@@ -15,7 +15,7 @@ Currently, this program takes in stereo audio files (input folder created on fir
   * Generally ensures that one channel doesn't overpower the other over the course of a track
   * In RX 11, the module's "Suggest" button only modifies the right channel
 
-Non-audio files (covers, documents, etc.) are transfered to the output folder. The original audio files are kept in the input folder, so remember to delete them if you don't need to re-run the program with changes.
+Processed audio files are sent to the output folder as 32-bit floating-point .wav files. Non-audio files (covers, documents, etc.) are transfered to the output folder. The original audio files are kept in the input folder, so remember to delete them if you don't need to re-run the program with changes.
 
 ## Reflection
 __Known problems I can't fix__:
@@ -40,7 +40,9 @@ __Things to do__:
 * Make code more idiomatic 
 * Increase program efficiency
   * The current memory usage is good, so the main feature to implement is multithreading
-  * Speed is heavily dependent on decoding (I/O reading) and saving (I/O writing)
+  * Main bottlenecks also seem to be Sympohonia decoding (I/O reading) and hound .wav file-saving (I/O writing)
+  * Another improvement would be to set the program's priority class (Idle -> Above Normal) and I/O priority (Normal -> High)
+    * Approximate 50% speedup (90s to 60s on test suite) using System Informer
 * and more...
 
 
