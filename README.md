@@ -41,6 +41,9 @@ __Things to do__:
   * Main bottlenecks also seem to be Sympohonia decoding (I/O reading) and hound .wav file-saving (I/O writing)
   * Another improvement would be to set the program's priority class (Idle -> Above Normal) and I/O priority (Normal -> High)
     * Approximate 50% speedup (90s to 60s on test suite) using System Informer to apply priorities
+* Add more error-checking
+  * e.g. Vec memory allocation on 32-bit targets for long files (12-hours of audio)
+    * could just suggest cutting down the audio into smaller bits
 * and more...
 
 

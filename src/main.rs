@@ -16,7 +16,10 @@
 )]
 // Modifications to restriction lints
 #![warn(clippy::restriction)]
-#![allow(clippy::as_conversions, reason = "other as_* lints are still used")]
+#![allow(
+    clippy::as_conversions,
+    reason = "some conversions are required, other cast_* lints are still used"
+)]
 #![allow(
     clippy::blanket_clippy_restriction_lints,
     reason = "whitelist seens better than blacklist"
@@ -131,22 +134,19 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Error> 
                         sample_buf = Some(SampleBuffer::<f32>::new(duration, spec));
                     }
 
-                    if let Some(buf) = &mut sample_buf {
-                        // Doesn't seem like plannar (first half is left samples, second half is right) is working
-                        buf.copy_interleaved_ref(audio_buf);
-                        let reservation = buf.samples().len() >> 1_usize; // div by 2
+                    if let Some(ref mut buf) = sample_buf {
+                        buf.copy_planar_ref(audio_buf);
+                        let length = buf.samples().len();
+                        // Unsure if reserving space is necessary due to extend_from_slice later
+                        let reservation = length >> 1_usize; // div by 2
                         left_samples.reserve(reservation);
                         right_samples.reserve(reservation);
 
-                        for sample in
-                            // SAFETY: interleaved samples in stereo audio has to be even
-                            unsafe { buf.samples().as_chunks_unchecked::<2>() }
-                        {
-                            // SAFETY: chunks ensure no out-of-bounds indexing
-                            left_samples.push(*unsafe { sample.first().unwrap_unchecked() });
-                            // SAFETY: chunks ensure no out-of-bounds indexing
-                            right_samples.push(*unsafe { sample.get(1).unwrap_unchecked() });
-                        }
+                        // SAFETY: reservation < length
+                        let (left, right) =
+                            unsafe { buf.samples().split_at_unchecked(reservation) };
+                        left_samples.extend_from_slice(left);
+                        right_samples.extend_from_slice(right);
                     }
                 }
                 // For some reason, Symphonia is fine if the decode doesn't work?
@@ -156,6 +156,8 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Error> 
             }
         }
     }
+    // No need to call .shrink_to_fit or care about over-allocation
+    // TODO: return error if fft_total would be larger than usize::MAX
     Ok(((left_samples, right_samples), meta_spec))
 }
 
@@ -219,14 +221,14 @@ fn align(left: &mut Complex<f32>, right: &mut Complex<f32>) {
         } else if left.re.abs() < left.im.abs() {
             // If there would be a division by zero, the sum coordinate is near the origin of 0.0 + 0.0i, so
             //   the left and right channels are either silence or are completely out-of-phase
-            // This block makes the channels land on the Im axis if the Re coordinate is small
+            // This block makes the channels land on the positive Im axis if the Re coordinate is small
             left.re = 0.0;
             left.im = left_norm;
             right.re = 0.0;
             right.im = right_norm;
         } else {
             // aka left_fft[index].im.abs() <= left_fft[index].re.abs(),
-            //   so we should land on the Re axis. This emulates the behavior of .atan2() where the angle is 0 radians
+            //   so we should land on the positive Re axis. This emulates the behavior of .atan2() where the angle is 0 radians
             left.re = left_norm;
             left.im = 0.0;
             right.re = right_norm;
@@ -277,12 +279,14 @@ fn process_samples(
     let mut not_right_channel = offset_vec;
     not_left_channel.append(&mut left_channel.clone());
     not_right_channel.append(&mut right_channel.clone());
-    left_channel.resize(original_length + offset, 0.0);
-    right_channel.resize(original_length + offset, 0.0);
+    let offset_total = not_left_channel.len();
+    // assert_eq!(offset_total, original_length + offset);
+    left_channel.resize(offset_total, 0.0);
+    right_channel.resize(offset_total, 0.0);
 
     // The algorithm I want to use will chunk each signal by sample_rate, so it's better to round up
     //   to the next multiple so we can use ChunksExact and have no remainder
-    let fft_total = left_channel.len().next_multiple_of(sample_rate);
+    let fft_total = offset_total.next_multiple_of(sample_rate);
     left_channel.resize(fft_total, 0.0);
     right_channel.resize(fft_total, 0.0);
     not_left_channel.resize(fft_total, 0.0);
@@ -328,23 +332,15 @@ fn process_samples(
 
         for index in 0..sample_rate {
             // SAFETY: index never exceeds sample_rate - 1
-            let window_multiplier = unsafe { window.get(index).unwrap_unchecked() };
+            let window_multiplier = *unsafe { window.get_unchecked(index) };
             // SAFETY: index never exceeds sample_rate - 1
-            unsafe {
-                *left.get_mut(index).unwrap_unchecked() *= window_multiplier;
-            }
+            *unsafe { left.get_unchecked_mut(index) } *= window_multiplier;
             // SAFETY: index never exceeds sample_rate - 1
-            unsafe {
-                *right.get_mut(index).unwrap_unchecked() *= window_multiplier;
-            }
+            *unsafe { right.get_unchecked_mut(index) } *= window_multiplier;
             // SAFETY: index never exceeds sample_rate - 1
-            unsafe {
-                *not_left.get_mut(index).unwrap_unchecked() *= window_multiplier;
-            }
+            *unsafe { not_left.get_unchecked_mut(index) } *= window_multiplier;
             // SAFETY: index never exceeds sample_rate - 1
-            unsafe {
-                *not_right.get_mut(index).unwrap_unchecked() *= window_multiplier;
-            }
+            *unsafe { not_right.get_unchecked_mut(index) } *= window_multiplier;
         }
 
         // Zero-pad signal for FFT
@@ -367,31 +363,23 @@ fn process_samples(
 
         // Remove local DC offset
         // SAFETY: first element must exist
-        unsafe {
-            *left_fft.first_mut().unwrap_unchecked() = new_dc;
-        }
+        *unsafe { left_fft.get_unchecked_mut(0) } = new_dc;
         // SAFETY: first element must exist
-        unsafe {
-            *right_fft.first_mut().unwrap_unchecked() = new_dc;
-        }
+        *unsafe { right_fft.get_unchecked_mut(0) } = new_dc;
         // SAFETY: first element must exist
-        unsafe {
-            *not_left_fft.first_mut().unwrap_unchecked() = new_dc;
-        }
+        *unsafe { not_left_fft.get_unchecked_mut(0) } = new_dc;
         // SAFETY: first element must exist
-        unsafe {
-            *not_right_fft.first_mut().unwrap_unchecked() = new_dc;
-        }
+        *unsafe { not_right_fft.get_unchecked_mut(0) } = new_dc;
 
         for index in 1..fft_complex_size {
             // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
-            let left_fft_index = unsafe { left_fft.get_mut(index).unwrap_unchecked() };
+            let left_fft_index = unsafe { left_fft.get_unchecked_mut(index) };
             // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
-            let right_fft_index = unsafe { right_fft.get_mut(index).unwrap_unchecked() };
+            let right_fft_index = unsafe { right_fft.get_unchecked_mut(index) };
             // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
-            let not_left_fft_index = unsafe { not_left_fft.get_mut(index).unwrap_unchecked() };
+            let not_left_fft_index = unsafe { not_left_fft.get_unchecked_mut(index) };
             // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
-            let not_right_fft_index = unsafe { not_right_fft.get_mut(index).unwrap_unchecked() };
+            let not_right_fft_index = unsafe { not_right_fft.get_unchecked_mut(index) };
             align(left_fft_index, right_fft_index);
             align(not_left_fft_index, not_right_fft_index);
         }
@@ -404,13 +392,13 @@ fn process_samples(
         // FFT zero-padding is ignored with this `for`` loop
         for index in 0..sample_rate {
             // SAFETY: sample rate is less than left.len, so index should always work
-            let left_index = *unsafe { left.get(index).unwrap_unchecked() };
+            let left_index = *unsafe { left.get_unchecked(index) };
             // SAFETY: sample rate is less than left.len, so index should always work
-            let right_index = *unsafe { right.get(index).unwrap_unchecked() };
+            let right_index = *unsafe { right.get_unchecked(index) };
             // SAFETY: sample rate is less than left.len, so index should always work
-            let not_left_index = *unsafe { not_left.get(index).unwrap_unchecked() };
+            let not_left_index = *unsafe { not_left.get_unchecked(index) };
             // SAFETY: sample rate is less than left.len, so index should always work
-            let not_right_index = *unsafe { not_right.get(index).unwrap_unchecked() };
+            let not_right_index = *unsafe { not_right.get_unchecked(index) };
             // Normalize FFT values to finish them off
             processed_left.push(left_index * recip_fft);
             processed_right.push(right_index * recip_fft);
@@ -428,8 +416,15 @@ fn process_samples(
 
     // Add the original and offset signals together to get the unwindowed level
     for index in 0..original_length {
-        processed_left[index] += processed_not_left[index + offset];
-        processed_right[index] += processed_not_right[index + offset];
+        // TODO: add checking for usize length audio
+        // SAFETY: index + offset < fft_total
+        let not_index = unsafe { index.unchecked_add(offset) };
+        // SAFETY: index + offset < fft_total
+        *unsafe { processed_left.get_unchecked_mut(index) } +=
+            *unsafe { processed_not_left.get_unchecked(not_index) };
+        // SAFETY: index + offset < fft_total
+        *unsafe { processed_right.get_unchecked_mut(index) } +=
+            *unsafe { processed_not_right.get_unchecked(not_index) };
     }
     drop(processed_not_left);
     drop(processed_not_right);
@@ -448,9 +443,9 @@ fn process_samples(
     let right_dc = processed_right.clone().iter().sum::<f32>() * original_length_inv;
     for index in 0..original_length {
         // SAFETY: index bounds check never fails
-        *unsafe { processed_left.get_mut(index).unwrap_unchecked() } -= left_dc;
+        *unsafe { processed_left.get_unchecked_mut(index) } -= left_dc;
         // SAFETY: index bounds check never fails
-        *unsafe { processed_right.get_mut(index).unwrap_unchecked() } -= right_dc;
+        *unsafe { processed_right.get_unchecked_mut(index) } -= right_dc;
     }
 
     // Average out the RMS of the left and right channels
@@ -473,9 +468,9 @@ fn process_samples(
     let right_equalizer = left_rms_sqrt / right_rms_sqrt;
     for index in 0..original_length {
         // SAFETY: index bounds check never fails
-        *unsafe { processed_left.get_mut(index).unwrap_unchecked() } *= left_equalizer as f32;
+        *unsafe { processed_left.get_unchecked_mut(index) } *= left_equalizer as f32;
         // SAFETY: index bounds check never fails
-        *unsafe { processed_right.get_mut(index).unwrap_unchecked() } *= right_equalizer as f32;
+        *unsafe { processed_right.get_unchecked_mut(index) } *= right_equalizer as f32;
     }
 
     // Overall processing is done
@@ -501,11 +496,11 @@ fn save_audio(file_path: &Path, audio: &(Box<[f32]>, Box<[f32]>), rate: u32) {
     for index in 0..length {
         // SAFETY: index guaranteed to be within length
         writer
-            .write_sample(*unsafe { audio.0.get(index).unwrap_unchecked() })
+            .write_sample(*unsafe { audio.0.get_unchecked(index) })
             .expect("Could not write sample");
         // SAFETY: index guaranteed to be within length
         writer
-            .write_sample(*unsafe { audio.1.get(index).unwrap_unchecked() })
+            .write_sample(*unsafe { audio.1.get_unchecked(index) })
             .expect("Could not write sample");
     }
     writer.finalize().expect("Could not finalize WAV file");
