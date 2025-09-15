@@ -4,22 +4,66 @@
 #![warn(clippy::nursery)]
 #![warn(clippy::pedantic)]
 #![warn(clippy::perf)]
+#![warn(clippy::style)]
 #![warn(clippy::suspicious)]
-#![allow(clippy::cast_precision_loss)] // Allow u64 as f64, since we shouldn't really have u64 exceeding the 52-bit mantissa
-#![allow(clippy::cast_possible_truncation)] // Allow f64 as f32, since f64 takes double the memory of f32 and we can only write f32
+#![allow(
+    clippy::cast_precision_loss,
+    reason = "allow u64 as f64, likey no precision loss"
+)]
+#![allow(
+    clippy::cast_possible_truncation,
+    reason = "allow using f64 for precision, then truncating to f32"
+)]
+// Modifications to restriction lints
+#![warn(clippy::restriction)]
+#![allow(clippy::as_conversions, reason = "other as_* lints are still used")]
+#![allow(
+    clippy::blanket_clippy_restriction_lints,
+    reason = "whitelist seens better than blacklist"
+)]
+#![allow(clippy::cast_sign_loss, reason = "only positive/unsigned values used")]
+#![allow(clippy::float_arithmetic, reason = "float arithmetic is required")]
+#![allow(clippy::implicit_return, reason = "make things rusty")]
+#![allow(clippy::print_stdout, reason = "printing to console is required")]
+#![allow(
+    clippy::question_mark_used,
+    reason = "no need to add additional error info"
+)]
+#![allow(clippy::semicolon_outside_block, reason = "personal preference")]
+#![allow(clippy::separated_literal_suffix, reason = "personal preference")]
+#![allow(
+    clippy::single_call_fn,
+    reason = "allow breaking long functions into smaller functions"
+)]
+#![allow(
+    clippy::unimplemented,
+    reason = "dependencies genuinely have unimplemented features"
+)]
+// #![allow(clippy::unwrap_used)]
+#![allow(clippy::use_debug, reason = "pretty print is good enough")]
 
 // Imports
-// TODO: consider Clippy's style lints for imports
-use realfft::{RealFftPlanner, num_complex, num_traits::Zero};
+use core::f64::consts::PI;
+use realfft::{
+    RealFftPlanner,
+    num_complex::{self, Complex},
+    num_traits::Zero as _,
+};
 use std::{
     fs,
-    io::{self, Write},
-    path, time,
+    io::{self, Write as _},
+    path::{self, Path},
+    time,
 };
 use symphonia::{
     core::{
-        self, codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStreamOptions,
+        audio::SampleBuffer,
+        codecs::DecoderOptions,
+        errors::Error,
+        formats::FormatOptions,
+        io::{MediaSourceStream, MediaSourceStreamOptions},
         meta::MetadataOptions,
+        probe::Hint,
     },
     default,
 };
@@ -29,7 +73,7 @@ const INPUT_DIR: &str = "./inputs/";
 const OUTPUT_DIR: &str = "./outputs/";
 
 type AudioMatrix = ((Vec<f32>, Vec<f32>), u32); // Seperated here due to Clippy lint
-fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, core::errors::Error> {
+fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Error> {
     // Based on Symphonia's docs.rs page and example code (mix of 0.5.4 and dev-0.6)
     // Numbers are from the Symphonia basic proceedures in its docs.rs
 
@@ -40,7 +84,7 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, core::e
 
     // 3
     // 4
-    let mss = core::io::MediaSourceStream::new(
+    let mss = MediaSourceStream::new(
         Box::new(fs::File::open(path)?),
         MediaSourceStreamOptions::default(),
     );
@@ -48,7 +92,7 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, core::e
     // 5
     // 6
     let probe_result = probe.format(
-        core::probe::Hint::new().with_extension("flac"),
+        Hint::new().with_extension("flac"),
         mss,
         &FormatOptions::default(),
         &MetadataOptions::default(),
@@ -80,28 +124,34 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, core::e
                         let spec = *audio_buf.spec();
                         meta_spec = spec.rate;
 
-                        let duration = audio_buf.capacity() as u64;
+                        // SAFETY: usize to u64 should never fail
+                        let duration: u64 =
+                            unsafe { audio_buf.capacity().try_into().unwrap_unchecked() };
 
-                        sample_buf = Some(core::audio::SampleBuffer::<f32>::new(duration, spec));
+                        sample_buf = Some(SampleBuffer::<f32>::new(duration, spec));
                     }
 
                     if let Some(buf) = &mut sample_buf {
                         // Doesn't seem like plannar (first half is left samples, second half is right) is working
                         buf.copy_interleaved_ref(audio_buf);
-                        let reservation = buf.samples().len() / 2;
+                        let reservation = buf.samples().len() >> 1_usize; // div by 2
                         left_samples.reserve(reservation);
                         right_samples.reserve(reservation);
 
-                        for sample in buf.samples().chunks_exact(2) {
-                            assert!(sample.len() >= 2);
-                            left_samples.push(sample[0]);
-                            right_samples.push(sample[1]);
+                        for sample in
+                            // SAFETY: interleaved samples in stereo audio has to be even
+                            unsafe { buf.samples().as_chunks_unchecked::<2>() }
+                        {
+                            // SAFETY: chunks ensure no out-of-bounds indexing
+                            left_samples.push(*unsafe { sample.first().unwrap_unchecked() });
+                            // SAFETY: chunks ensure no out-of-bounds indexing
+                            right_samples.push(*unsafe { sample.get(1).unwrap_unchecked() });
                         }
                     }
                 }
                 // For some reason, Symphonia is fine if the decode doesn't work?
                 // like with malformed data or something
-                Err(core::errors::Error::DecodeError(_)) => (),
+                Err(Error::DecodeError(_)) => (),
                 Err(_) => break,
             }
         }
@@ -136,12 +186,53 @@ fn window(rate: usize) -> Box<[f32]> {
     // Note that window(0, rate) == 0.0 and window(rate - 1, rate) == window(1, rate) != 0.0, so the only zero point is at n == 0.
     //   This is to satisfy some periodicity property/implication, rather than both ends being 0.0
     (0..rate)
-        .map(|n| {
-            (std::f64::consts::PI * n as f64 / rate as f64)
-                .sin()
-                .powi(2) as f32
-        })
+        .map(|n| (PI * n as f64 / rate as f64).sin().powi(2) as f32)
         .collect()
+}
+
+fn align(left: &mut Complex<f32>, right: &mut Complex<f32>) {
+    // Align the phase of the left and right channels using the circular mean / true midpoint
+    // Higher weight towards higher magnitude, so the channel with the higher magnitude doesn't rotate much,
+    //   while the smaller magnitude channel may rotate a lot
+
+    // Circular mean / true midpoint
+    let sum = *left + *right;
+
+    // Squares without .sqrt until later
+    let sum_sqr_inv = sum.norm_sqr().recip();
+    let left_sqr = left.norm_sqr();
+    let right_sqr = right.norm_sqr();
+
+    // Ensure no division by zero or similar
+    if sum_sqr_inv.is_normal() {
+        // Equivalent to using cos-sin of atan2(sum)
+        *left = sum.scale((left_sqr * sum_sqr_inv).sqrt());
+        *right = sum.scale((right_sqr * sum_sqr_inv).sqrt());
+    } else {
+        let sum_norm_inv = sum_sqr_inv.sqrt();
+        let left_norm = left_sqr.sqrt();
+        let right_norm = right_sqr.sqrt();
+        // Check if the division by close-to-zero is recoverable by taking the square root
+        if sum_norm_inv.is_normal() {
+            *left = sum.scale(left_norm * sum_norm_inv);
+            *right = sum.scale(right_norm * sum_norm_inv);
+        } else if left.re.abs() < left.im.abs() {
+            // If there would be a division by zero, the sum coordinate is near the origin of 0.0 + 0.0i, so
+            //   the left and right channels are either silence or are completely out-of-phase
+            // This block makes the channels land on the Im axis if the Re coordinate is small
+            left.re = 0.0;
+            left.im = left_norm;
+            right.re = 0.0;
+            right.im = right_norm;
+        } else {
+            // aka left_fft[index].im.abs() <= left_fft[index].re.abs(),
+            //   so we should land on the Re axis. This emulates the behavior of .atan2() where the angle is 0 radians
+            left.re = left_norm;
+            left.im = 0.0;
+            right.re = right_norm;
+            right.im = 0.0;
+        }
+    }
 }
 
 // TODO: break up into smaller functions
@@ -153,7 +244,7 @@ fn process_samples(
     let mut left_channel = data.0;
     let mut right_channel = data.1;
     // Force minimum reconstructed frequency to 20 hz
-    let sample_rate = rate as usize / 20;
+    let sample_rate = (f64::from(rate) / 20_f64) as usize;
 
     // Best to do a small FFT to prevent transient smearing
     let fft_size = next_fast_fft(sample_rate);
@@ -178,8 +269,9 @@ fn process_samples(
 
     // When using 20 hz, 44.1khz needs 1102.5 samples of silence, which becomes 1102.
     // The effect is insignificant, giving a 0.0712% or 0.00618dB difference
-    let offset = sample_rate >> 1;
-
+    // TODO: offset can technically fail original_length is near usize::MAX
+    //   would happen if usize == u32 and decoded a 12-hour 96khz file
+    let offset = sample_rate >> 1_usize;
     let offset_vec = vec![0.0_f32; offset];
     let mut not_left_channel = offset_vec.clone();
     let mut not_right_channel = offset_vec;
@@ -197,15 +289,15 @@ fn process_samples(
     not_right_channel.resize(fft_total, 0.0);
 
     // Turning the Vec's into Box'es will shrink them and prevent further allocations and mutations
-    let left_channel = left_channel.into_boxed_slice();
-    let right_channel = right_channel.into_boxed_slice();
-    let not_left_channel = not_left_channel.into_boxed_slice();
-    let not_right_channel = not_right_channel.into_boxed_slice();
+    let left_channel_box = left_channel.into_boxed_slice();
+    let right_channel_box = right_channel.into_boxed_slice();
+    let not_left_channel_box = not_left_channel.into_boxed_slice();
+    let not_right_channel_box = not_right_channel.into_boxed_slice();
     // Chunking for later
-    let left_channel = left_channel.chunks_exact(sample_rate);
-    let right_channel = right_channel.chunks_exact(sample_rate);
-    let not_left_channel = not_left_channel.chunks_exact(sample_rate);
-    let not_right_channel = not_right_channel.chunks_exact(sample_rate);
+    let left_channel_chunks = left_channel_box.chunks_exact(sample_rate);
+    let right_channel_chunks = right_channel_box.chunks_exact(sample_rate);
+    let not_left_channel_chunks = not_left_channel_box.chunks_exact(sample_rate);
+    let not_right_channel_chunks = not_right_channel_box.chunks_exact(sample_rate);
 
     // Saving samples for later
     // .reserve_exact() reduces memory by preventing over-allocation
@@ -225,25 +317,34 @@ fn process_samples(
     let mut not_left_fft = r2c.make_output_vec();
     let mut not_right_fft = r2c.make_output_vec();
 
-    for chunk in left_channel
-        .zip(right_channel)
-        .zip(not_left_channel.zip(not_right_channel))
+    for chunk in left_channel_chunks
+        .zip(right_channel_chunks)
+        .zip(not_left_channel_chunks.zip(not_right_channel_chunks))
     {
         let mut left = chunk.0.0.to_vec();
         let mut right = chunk.0.1.to_vec();
         let mut not_left = chunk.1.0.to_vec();
         let mut not_right = chunk.1.1.to_vec();
 
-        assert!(left.len() >= sample_rate);
-        assert!(right.len() >= sample_rate);
-        assert!(not_left.len() >= sample_rate);
-        assert!(not_right.len() >= sample_rate);
         for index in 0..sample_rate {
-            let window_multiplier = window[index];
-            left[index] *= window_multiplier;
-            right[index] *= window_multiplier;
-            not_left[index] *= window_multiplier;
-            not_right[index] *= window_multiplier;
+            // SAFETY: index never exceeds sample_rate - 1
+            let window_multiplier = unsafe { window.get(index).unwrap_unchecked() };
+            // SAFETY: index never exceeds sample_rate - 1
+            unsafe {
+                *left.get_mut(index).unwrap_unchecked() *= window_multiplier;
+            }
+            // SAFETY: index never exceeds sample_rate - 1
+            unsafe {
+                *right.get_mut(index).unwrap_unchecked() *= window_multiplier;
+            }
+            // SAFETY: index never exceeds sample_rate - 1
+            unsafe {
+                *not_left.get_mut(index).unwrap_unchecked() *= window_multiplier;
+            }
+            // SAFETY: index never exceeds sample_rate - 1
+            unsafe {
+                *not_right.get_mut(index).unwrap_unchecked() *= window_multiplier;
+            }
         }
 
         // Zero-pad signal for FFT
@@ -259,106 +360,62 @@ fn process_samples(
         //   but RealFFT does return Results due to some zero-check
         //   RealFFT author says to just ignore these in the meantime.
         // https://github.com/HEnquist/realfft/issues/41#issuecomment-2050347470
-        let _ = r2c.process(&mut left, &mut left_fft);
-        let _ = r2c.process(&mut right, &mut right_fft);
-        let _ = r2c.process(&mut not_left, &mut not_left_fft);
-        let _ = r2c.process(&mut not_right, &mut not_right_fft);
-
-        assert!(left_fft.len() >= fft_complex_size);
-        assert!(right_fft.len() >= fft_complex_size);
-        assert!(not_left_fft.len() >= fft_complex_size);
-        assert!(not_right_fft.len() >= fft_complex_size);
+        _ = r2c.process(&mut left, &mut left_fft);
+        _ = r2c.process(&mut right, &mut right_fft);
+        _ = r2c.process(&mut not_left, &mut not_left_fft);
+        _ = r2c.process(&mut not_right, &mut not_right_fft);
 
         // Remove local DC offset
-        left_fft[0] = new_dc;
-        right_fft[0] = new_dc;
-        not_left_fft[0] = new_dc;
-        not_right_fft[0] = new_dc;
-
-        for index in 1..fft_complex_size {
-            // Align the phase of the left and right channels using the circular mean / true midpoint
-            // Higher weight towards higher magnitude, so the channel with the higher magnitude doesn't rotate much,
-            //   while the smaller magnitude channel may rotate a lot
-
-            // Circular mean / true midpoint
-            let sum = left_fft[index] + right_fft[index];
-            let not_sum = not_left_fft[index] + not_right_fft[index];
-
-            // Squares without .sqrt until later
-            let sum_sqr_inv = sum.norm_sqr().recip();
-            let left_sqr = left_fft[index].norm_sqr();
-            let right_sqr = right_fft[index].norm_sqr();
-            let not_sum_sqr_inv = not_sum.norm_sqr().recip();
-            let not_left_sqr = not_left_fft[index].norm_sqr();
-            let not_right_sqr = not_right_fft[index].norm_sqr();
-
-            // Ensure no division by zero or similar
-            if sum_sqr_inv.is_normal() {
-                // Equivalent to using cos-sin of atan2(sum)
-                left_fft[index] = sum.scale((left_sqr * sum_sqr_inv).sqrt());
-                right_fft[index] = sum.scale((right_sqr * sum_sqr_inv).sqrt());
-            } else {
-                let sum_norm_inv = sum_sqr_inv.sqrt();
-                let left_norm = left_sqr.sqrt();
-                let right_norm = right_sqr.sqrt();
-                // Check if the division by close-to-zero is recoverable by taking the square root
-                if sum_norm_inv.is_normal() {
-                    left_fft[index] = sum.scale(left_norm * sum_norm_inv);
-                    right_fft[index] = sum.scale(right_norm * sum_norm_inv);
-                } else if left_fft[index].re.abs() < left_fft[index].im.abs() {
-                    // If there would be a division by zero, the sum coordinate is near the origin of 0.0 + 0.0i, so
-                    //   the left and right channels are either silence or are completely out-of-phase
-                    // This block makes the channels land on the Im axis if the Re coordinate is small
-                    left_fft[index].re = 0.0;
-                    left_fft[index].im = left_norm;
-                    right_fft[index].re = 0.0;
-                    right_fft[index].im = right_norm;
-                } else {
-                    // aka left_fft[index].im.abs() <= left_fft[index].re.abs(),
-                    //   so we should land on the Re axis. This emulates the behavior of .atan2() where the angle is 0 radians
-                    left_fft[index].re = left_norm;
-                    left_fft[index].im = 0.0;
-                    right_fft[index].re = right_norm;
-                    right_fft[index].im = 0.0;
-                }
-            }
-            // ^
-            if not_sum_sqr_inv.is_normal() {
-                not_left_fft[index] = not_sum.scale((not_left_sqr * not_sum_sqr_inv).sqrt());
-                not_right_fft[index] = not_sum.scale((not_right_sqr * not_sum_sqr_inv).sqrt());
-            } else {
-                let not_sum_norm_inv = not_sum_sqr_inv.sqrt();
-                let not_left_norm = not_left_sqr.sqrt();
-                let not_right_norm = not_right_sqr.sqrt();
-                if not_sum_norm_inv.is_normal() {
-                    not_left_fft[index] = not_sum.scale(not_left_norm * not_sum_norm_inv);
-                    not_right_fft[index] = not_sum.scale(not_right_norm * not_sum_norm_inv);
-                } else if not_left_fft[index].re.abs() < not_left_fft[index].im.abs() {
-                    not_left_fft[index].re = 0.0;
-                    not_left_fft[index].im = not_left_norm;
-                    not_right_fft[index].re = 0.0;
-                    not_right_fft[index].im = not_right_norm;
-                } else {
-                    not_left_fft[index].re = not_left_norm;
-                    not_left_fft[index].im = 0.0;
-                    not_right_fft[index].re = not_right_norm;
-                    not_right_fft[index].im = 0.0;
-                }
-            }
+        // SAFETY: first element must exist
+        unsafe {
+            *left_fft.first_mut().unwrap_unchecked() = new_dc;
+        }
+        // SAFETY: first element must exist
+        unsafe {
+            *right_fft.first_mut().unwrap_unchecked() = new_dc;
+        }
+        // SAFETY: first element must exist
+        unsafe {
+            *not_left_fft.first_mut().unwrap_unchecked() = new_dc;
+        }
+        // SAFETY: first element must exist
+        unsafe {
+            *not_right_fft.first_mut().unwrap_unchecked() = new_dc;
         }
 
-        let _ = c2r.process(&mut left_fft, &mut left);
-        let _ = c2r.process(&mut right_fft, &mut right);
-        let _ = c2r.process(&mut not_left_fft, &mut not_left);
-        let _ = c2r.process(&mut not_right_fft, &mut not_right);
+        for index in 1..fft_complex_size {
+            // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
+            let left_fft_index = unsafe { left_fft.get_mut(index).unwrap_unchecked() };
+            // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
+            let right_fft_index = unsafe { right_fft.get_mut(index).unwrap_unchecked() };
+            // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
+            let not_left_fft_index = unsafe { not_left_fft.get_mut(index).unwrap_unchecked() };
+            // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
+            let not_right_fft_index = unsafe { not_right_fft.get_mut(index).unwrap_unchecked() };
+            align(left_fft_index, right_fft_index);
+            align(not_left_fft_index, not_right_fft_index);
+        }
+
+        _ = c2r.process(&mut left_fft, &mut left);
+        _ = c2r.process(&mut right_fft, &mut right);
+        _ = c2r.process(&mut not_left_fft, &mut not_left);
+        _ = c2r.process(&mut not_right_fft, &mut not_right);
 
         // FFT zero-padding is ignored with this `for`` loop
         for index in 0..sample_rate {
+            // SAFETY: sample rate is less than left.len, so index should always work
+            let left_index = *unsafe { left.get(index).unwrap_unchecked() };
+            // SAFETY: sample rate is less than left.len, so index should always work
+            let right_index = *unsafe { right.get(index).unwrap_unchecked() };
+            // SAFETY: sample rate is less than left.len, so index should always work
+            let not_left_index = *unsafe { not_left.get(index).unwrap_unchecked() };
+            // SAFETY: sample rate is less than left.len, so index should always work
+            let not_right_index = *unsafe { not_right.get(index).unwrap_unchecked() };
             // Normalize FFT values to finish them off
-            processed_left.push(left[index] * recip_fft);
-            processed_right.push(right[index] * recip_fft);
-            processed_not_left.push(not_left[index] * recip_fft);
-            processed_not_right.push(not_right[index] * recip_fft);
+            processed_left.push(left_index * recip_fft);
+            processed_right.push(right_index * recip_fft);
+            processed_not_left.push(not_left_index * recip_fft);
+            processed_not_right.push(not_right_index * recip_fft);
         }
     }
 
@@ -368,11 +425,6 @@ fn process_samples(
     drop(not_right_fft);
     drop(r2c);
     drop(c2r);
-
-    assert!(processed_left.len() >= original_length);
-    assert!(processed_right.len() >= original_length);
-    assert!(processed_not_left.len() >= fft_total);
-    assert!(processed_not_right.len() >= fft_total);
 
     // Add the original and offset signals together to get the unwindowed level
     for index in 0..original_length {
@@ -388,8 +440,6 @@ fn process_samples(
     processed_left.shrink_to(original_length);
     processed_right.shrink_to(original_length);
 
-    assert!(processed_left.len() >= original_length);
-    assert!(processed_right.len() >= original_length);
     // Remove overall DC after all local DC was removed
     // DC is just the average of the whole signal
     // RMS averaging below needs f64 instead of f32, but this DC doesn't need it,
@@ -397,8 +447,10 @@ fn process_samples(
     let left_dc = processed_left.clone().iter().sum::<f32>() * original_length_inv;
     let right_dc = processed_right.clone().iter().sum::<f32>() * original_length_inv;
     for index in 0..original_length {
-        processed_left[index] -= left_dc;
-        processed_right[index] -= right_dc;
+        // SAFETY: index bounds check never fails
+        *unsafe { processed_left.get_mut(index).unwrap_unchecked() } -= left_dc;
+        // SAFETY: index bounds check never fails
+        *unsafe { processed_right.get_mut(index).unwrap_unchecked() } -= right_dc;
     }
 
     // Average out the RMS of the left and right channels
@@ -406,14 +458,12 @@ fn process_samples(
     //   since the divisions cancel out later and the square roots are made later
     // Cast from f32 to f64 used to prevent imprecision when adding lots of f32,
     //   where channels would differ by about 0.02dB / 0.25%
-    let left_s = processed_left
-        .clone()
-        .iter()
-        .fold(0.0_f64, |acc, s| f64::from(*s).mul_add(f64::from(*s), acc));
-    let right_s = processed_right
-        .clone()
-        .iter()
-        .fold(0.0_f64, |acc, s| f64::from(*s).mul_add(f64::from(*s), acc));
+    let left_s = processed_left.clone().iter().fold(0.0_f64, |acc, samp| {
+        f64::from(*samp).mul_add(f64::from(*samp), acc)
+    });
+    let right_s = processed_right.clone().iter().fold(0.0_f64, |acc, samp| {
+        f64::from(*samp).mul_add(f64::from(*samp), acc)
+    });
     // First square root is to get the multiplier when applied to s^2,
     //   second square root is to get the multiplier when applied to just s.
     // .sqrt().sqrt() is used over .powf(0.25) since .sqrt() uses infinite precision
@@ -422,8 +472,10 @@ fn process_samples(
     let left_equalizer = right_rms_sqrt / left_rms_sqrt;
     let right_equalizer = left_rms_sqrt / right_rms_sqrt;
     for index in 0..original_length {
-        processed_left[index] *= left_equalizer as f32;
-        processed_right[index] *= right_equalizer as f32;
+        // SAFETY: index bounds check never fails
+        *unsafe { processed_left.get_mut(index).unwrap_unchecked() } *= left_equalizer as f32;
+        // SAFETY: index bounds check never fails
+        *unsafe { processed_right.get_mut(index).unwrap_unchecked() } *= right_equalizer as f32;
     }
 
     // Overall processing is done
@@ -434,7 +486,7 @@ fn process_samples(
     )
 }
 
-fn save_audio(file_path: &std::path::Path, audio: &(Box<[f32]>, Box<[f32]>), rate: u32) {
+fn save_audio(file_path: &Path, audio: &(Box<[f32]>, Box<[f32]>), rate: u32) {
     // TODO: add simple functionality for mono signals?
     // Might be a lot of work for something you can re-render to stereo in foobar2000
     let spec = hound::WavSpec {
@@ -446,14 +498,14 @@ fn save_audio(file_path: &std::path::Path, audio: &(Box<[f32]>, Box<[f32]>), rat
     let mut writer = hound::WavWriter::create(file_path, spec).expect("Could not create writer");
     let length = audio.0.len();
 
-    assert!(audio.0.len() >= length);
-    assert!(audio.1.len() >= length);
     for index in 0..length {
+        // SAFETY: index guaranteed to be within length
         writer
-            .write_sample(audio.0[index])
+            .write_sample(*unsafe { audio.0.get(index).unwrap_unchecked() })
             .expect("Could not write sample");
+        // SAFETY: index guaranteed to be within length
         writer
-            .write_sample(audio.1[index])
+            .write_sample(*unsafe { audio.1.get(index).unwrap_unchecked() })
             .expect("Could not write sample");
     }
     writer.finalize().expect("Could not finalize WAV file");
@@ -466,22 +518,22 @@ fn get_paths(directory: path::PathBuf) -> io::Result<Vec<path::PathBuf>> {
     let folder_read = fs::read_dir(directory)?;
 
     for entry in folder_read {
-        let entry = entry?;
-        let meta = entry.metadata()?;
+        let unwrapped_entry = entry?;
+        let meta = unwrapped_entry.metadata()?;
 
         if meta.is_dir() {
-            let mut subdir = get_paths(entry.path())?;
+            let mut subdir = get_paths(unwrapped_entry.path())?;
             entries.append(&mut subdir);
         }
 
         if meta.is_file() {
-            entries.push(entry.path());
+            entries.push(unwrapped_entry.path());
         }
     }
     Ok(entries)
 }
 
-fn main() -> Result<(), core::errors::Error> {
+fn main() -> Result<(), Error> {
     // Keeping the time for benchmarking
     let time = time::Instant::now();
 
@@ -489,12 +541,12 @@ fn main() -> Result<(), core::errors::Error> {
     match fs::exists(INPUT_DIR) {
         Ok(true) => {}
         Ok(false) => {
-            let _ = fs::create_dir(INPUT_DIR);
+            _ = fs::create_dir_all(INPUT_DIR);
             println!("Notice: Inputs folder created. Copy audio files here to process them.");
             return Ok(());
         }
         // Symphonia has a wrapper for IoErrors
-        Err(err) => return Err(core::errors::Error::IoError(err)),
+        Err(err) => return Err(Error::IoError(err)),
     }
 
     // Get list of files in INPUT_DIR
@@ -507,10 +559,8 @@ fn main() -> Result<(), core::errors::Error> {
         println!("Found file: {}", entry.display());
         print!("    Decoding...");
         io::stdout().flush()?; // Show print instantly
-        let mut output_path = path::PathBuf::new();
-        let unprefix_output = entry.strip_prefix(INPUT_DIR).unwrap();
-        output_path.push(OUTPUT_DIR);
-        output_path.push(unprefix_output);
+        let mut output_path =
+            path::PathBuf::from(OUTPUT_DIR).join(entry.strip_prefix(INPUT_DIR).unwrap());
 
         let channels: (Vec<f32>, Vec<f32>);
         let sample_rate: u32;
@@ -522,16 +572,16 @@ fn main() -> Result<(), core::errors::Error> {
                 sample_rate = data.1;
             }
             // The following errors usually happen if Symphonia attempts to open a .jpg or .png
-            Err(core::errors::Error::IoError(err)) => {
+            Err(Error::IoError(err)) => {
                 if err.kind() == io::ErrorKind::UnexpectedEof {
                     println!("  Invalid or unsupported audio, sent to output.");
                     fs::create_dir_all(output_path.parent().unwrap())?;
                     fs::rename(entry, output_path)?;
                     continue;
                 }
-                return Err(core::errors::Error::IoError(err)); // Except here, where an actual audio file failed decoding
+                return Err(Error::IoError(err)); // Except here, where an actual audio file failed decoding
             }
-            Err(core::errors::Error::Unsupported(_) | core::errors::Error::DecodeError(_)) => {
+            Err(Error::Unsupported(_) | Error::DecodeError(_)) => {
                 println!("    Invalid or unsupported audio, sent to output");
                 fs::create_dir_all(output_path.parent().unwrap())?;
                 fs::rename(entry, output_path)?;
