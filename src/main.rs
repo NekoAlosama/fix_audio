@@ -194,10 +194,16 @@ fn window(rate: usize) -> Box<[f32]> {
 
 fn align(left: &mut Complex<f32>, right: &mut Complex<f32>) {
     // Align the phase of the left and right channels using the circular mean / true midpoint
+    // Using this method makes the resulting phase match the downmixed signal phase (left + right / 2),
+    //   i.e. zero-crossings should match with mid channel
     // Higher weight towards higher magnitude, so the channel with the higher magnitude doesn't rotate much,
     //   while the smaller magnitude channel may rotate a lot
 
     // Circular mean / true midpoint
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "clippy thinks this is an integer add, whereas f32 will saturate to the infinities"
+    )]
     let sum = *left + *right;
 
     // Squares without .sqrt until later
@@ -205,34 +211,25 @@ fn align(left: &mut Complex<f32>, right: &mut Complex<f32>) {
     let left_sqr = left.norm_sqr();
     let right_sqr = right.norm_sqr();
 
-    // Ensure no division by zero or similar
+    // Prevent propagation of NaN or infinity
     if sum_sqr_inv.is_normal() {
         // Equivalent to using cos-sin of atan2(sum)
         *left = sum.scale((left_sqr * sum_sqr_inv).sqrt());
         *right = sum.scale((right_sqr * sum_sqr_inv).sqrt());
     } else {
-        let sum_norm_inv = sum_sqr_inv.sqrt();
+        let sum_norm_inv = sum.norm().recip();
         let left_norm = left_sqr.sqrt();
         let right_norm = right_sqr.sqrt();
-        // Check if the division by close-to-zero is recoverable by taking the square root
+        // Check non-normal sum_sqr_inv is recoverable by taking the square root before .recip()
         if sum_norm_inv.is_normal() {
             *left = sum.scale(left_norm * sum_norm_inv);
             *right = sum.scale(right_norm * sum_norm_inv);
-        } else if left.re.abs() < left.im.abs() {
-            // If there would be a division by zero, the sum coordinate is near the origin of 0.0 + 0.0i, so
-            //   the left and right channels are either silence or are completely out-of-phase
-            // This block makes the channels land on the positive Im axis if the Re coordinate is small
-            left.re = 0.0;
-            left.im = left_norm;
-            right.re = 0.0;
-            right.im = right_norm;
         } else {
-            // aka left_fft[index].im.abs() <= left_fft[index].re.abs(),
-            //   so we should land on the positive Re axis. This emulates the behavior of .atan2() where the angle is 0 radians
-            left.re = left_norm;
-            left.im = 0.0;
-            right.re = right_norm;
-            right.im = 0.0;
+            // If we get here, the sum coordinate is near the origin of 0.0 + 0.0i, so
+            //   the left and right channels are either silence or are completely out-of-phase
+            // Since we want to keep the zero-crossings, we just have the right copy the left
+            // Implicitly, *left = *left
+            *right = *left;
         }
     }
 }
@@ -246,7 +243,7 @@ fn process_samples(
     let mut left_channel = data.0;
     let mut right_channel = data.1;
     // Force minimum reconstructed frequency to 20 hz
-    let sample_rate = (f64::from(rate) / 20_f64) as usize;
+    let sample_rate = (f64::from(rate) / 20.0_f64) as usize;
 
     // Best to do a small FFT to prevent transient smearing
     let fft_size = next_fast_fft(sample_rate);
@@ -263,16 +260,14 @@ fn process_samples(
     // Pre-calculate window function
     let window = window(sample_rate);
 
-    // It's better to add the offset between channels as silence here
     // For the original signal, silence is added to the end, while the
     //   offset signal's silence is added to the beginning
-    let original_length = left_channel.len();
-    let original_length_inv = (original_length as f64).recip() as f32;
-
-    // When using 20 hz, 44.1khz needs 1102.5 samples of silence, which becomes 1102.
-    // The effect is insignificant, giving a 0.0712% or 0.00618dB difference
+    // When using 20 hz, 44.1khz needs 1102.5 samples of silence, which becomes 1102
+    // The effect is insignificant anyways, giving a 0.0712% or 0.00619dB difference
     // TODO: offset can technically fail original_length is near usize::MAX
     //   would happen if usize == u32 and decoded a 12-hour 96khz file
+    let original_length = left_channel.len();
+    let original_length_inv = (original_length as f64).recip() as f32;
     let offset = sample_rate >> 1_usize;
     let offset_vec = vec![0.0_f32; offset];
     let mut not_left_channel = offset_vec.clone();
