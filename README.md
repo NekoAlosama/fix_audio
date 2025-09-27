@@ -3,24 +3,27 @@ Pet project of processing audio files by and for NekoAlosma to learn FFT process
 
 Currently, this program takes in stereo audio files (input folder created on first run) and:
 * Aligns phase information between the left and right channel
-  * Idea based on Thimeo Stereo Tool's "Image phase amplifier: 0%", automated through Thimeo WatchCat
-  * (Heavily) reduces perceived stereo width in exchange for a better mono downmix
-  * I listen to music both on one earbud and in my car stereo, so this prevents phase cancellation and keeps side/stereo information
-* Removes DC bias
-  * Idea based on iZotope RX 11's "Filter DC Offset" option in the "De-hum" module, automated with RX 11's "Batch Processor"
-  * Removes inaudible 0.0 hz noise
-  * The noise artifically modifies loudness statistics and is carried through further processing
-* Averages the RMS of the left and right channel
-  * Idea based on iZotope RX 11's "Azimuth" module, can't be automated
-  * Generally ensures that one channel doesn't overpower the other over the course of a track
-  * In RX 11, the module's "Suggest" button only modifies the right channel
+  * Concept based on Thimeo Stereo Tool's "Image phase amplifier: 0%", automated through Thimeo WatchCat
+  * Use case: switching between a mono speaker to a car stereo
+    * Prevents per-frequency phase cancellation for a better downmix to mono
+    * Heavily reduces the perceived stereo width, but instrument placement / channel-specific sounds are preserved
+* Removes DC bias / inaudible 0.0 hz noise
+  * Concept based on iZotope RX 11's "Filter DC Offset" option in its "De-hum" module, automated with RX 11's "Batch Processor"
+  * Use case: loudness stats like RMS and peak level could be incorrect because of DC noise
+    * Generally caused by amateur mixing and mastering (i.e. YAYAYI - track 13 from self-titled)
+    * Noise may also cause audible noise/artifacts when converting to lossy formats or on speaker playback
+* Averages the loudness of the left and right channel
+  * Concept based on iZotope RX 11's "Azimuth" module, can't be automated
+  * Use case: ensure that one channel doesn't overpower the other over the course of a track
+    * Uses the EBU R 128 Integrated Loudness, while RX 11 uses plain RMS
+    * Plain RMS is affected by DC bias
 
 Processed audio files are sent to the output folder as 32-bit floating-point .wav files. Non-audio files (covers, documents, etc.) are transfered to the output folder. The original audio files are kept in the input folder, so remember to delete them if you don't need to re-run the program with changes.
 
 ## Reflection
 __Known problems I can't fix__:
 * Symphonia 0.5.4 doesn't support files above 96khz
-  * Fixed in dev-0.6 branch, but it's unstable.
+  * Fixed in dev-0.6 branch, but that branch is unstable / unusable
 * Cannot copy tags from input to output (lack of ecosystem support?)
   * Symphonia only supports tag reading
   * hound does not support writing .wav Vorbis tags
@@ -35,6 +38,10 @@ __Things to do__:
   * Make sure to bypass phase alignment
 * Add support for videos with an audio track (.webm, .mkv)
   * Symphonia doesn't have a demuxer example/tutorial?
+* Consider locking final DC noise removal in a feature flag or similar
+  * Local DC bias is already removed through FFT
+  * Currently, overall DC noise is added back to reduce peak levels
+    * DC noise removal should be used if more processing is needed or if added noise causes problems
 * Make code more idiomatic
 * Increase program efficiency
   * The current memory usage is good, so the main feature to implement is multithreading
@@ -44,7 +51,5 @@ __Things to do__:
 * Add more error-checking
   * e.g. Vec memory allocation on 32-bit targets for long files (12-hours of audio)
     * could just suggest cutting down the audio into smaller bits
-* and more...
-
 
 ![flamegraph](flamegraph.svg)

@@ -1,11 +1,4 @@
-// General Clippy warnings
-#![warn(clippy::complexity)]
-#![warn(clippy::correctness)]
-#![warn(clippy::nursery)]
-#![warn(clippy::pedantic)]
-#![warn(clippy::perf)]
-#![warn(clippy::style)]
-#![warn(clippy::suspicious)]
+// Allow-list for non-restriction lints
 #![allow(
     clippy::cast_precision_loss,
     reason = "allow u64 as f64, likey no precision loss"
@@ -15,7 +8,6 @@
     reason = "allow using f64 for precision, then truncating to f32"
 )]
 // Modifications to restriction lints
-#![warn(clippy::restriction)]
 #![allow(
     clippy::as_conversions,
     reason = "some conversions are required, other cast_* lints are still used"
@@ -38,19 +30,17 @@
     clippy::single_call_fn,
     reason = "allow breaking long functions into smaller functions"
 )]
-#![allow(
-    clippy::unimplemented,
-    reason = "dependencies genuinely have unimplemented features"
-)]
 // #![allow(clippy::unwrap_used)]
 #![allow(clippy::use_debug, reason = "pretty print is good enough")]
 
 // Imports
 use core::f64::consts::PI;
+use ebur128::{EbuR128, Mode};
+use itertools::{Itertools as _, izip};
 use realfft::{
     RealFftPlanner,
     num_complex::{self, Complex},
-    num_traits::Zero as _,
+    num_traits::Zero,
 };
 use std::{
     fs,
@@ -72,13 +62,17 @@ use symphonia::{
 };
 
 // Hard-coded directories
+/// Input directory, created on first run
 const INPUT_DIR: &str = "./inputs/";
+/// Output directory
 const OUTPUT_DIR: &str = "./outputs/";
 
-type AudioMatrix = ((Vec<f32>, Vec<f32>), u32); // Seperated here due to Clippy lint
+/// Seperated here due to Clippy lint
+type AudioMatrix = ((Vec<f32>, Vec<f32>), u32);
+/// Get samples and metadata for a given file using `Symphonia`
 fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Error> {
-    // Based on Symphonia's docs.rs page and example code (mix of 0.5.4 and dev-0.6)
-    // Numbers are from the Symphonia basic proceedures in its docs.rs
+    // Based on `Symphonia`'s docs.rs page and example code (mix of 0.5.4 and dev-0.6)
+    // Numbers are from the `Symphonia` basic proceedures in its docs.rs
 
     // 1
     let code_registry = default::get_codecs();
@@ -149,7 +143,7 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Error> 
                         right_samples.extend_from_slice(right);
                     }
                 }
-                // For some reason, Symphonia is fine if the decode doesn't work?
+                // For some reason, `Symphonia` is fine if the decode doesn't work?
                 // like with malformed data or something
                 Err(Error::DecodeError(_)) => (),
                 Err(_) => break,
@@ -162,12 +156,17 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Error> 
 }
 
 // TODO: add algorithm for arbitrary-length FFT?
+/// Given a sample rate, get the best FFT size for `RustFFT` to process
+/// `RustFFT` likes FFT lengths which are powers of 2 multiplied with powers of 3
+/// We'll zero-pad the seconds anyway
 fn next_fast_fft(rate: usize) -> usize {
-    // RustFFT likes FFT lengths which are powers of 2 multiplied with powers of 3
-    // We'll zero-pad the seconds anyway
+    #[expect(
+        clippy::unimplemented,
+        reason = "`symphonia` 0.5.4 only supports 3 sample rates"
+    )]
     match rate {
         // Sample rate is divided by 20
-        // Commented values are currently unsupported by Symphonia 0.5.4
+        // Commented values are currently unsupported by `Symphonia` 0.5.4
         //   but are expected to be supported in dev-0.6
         2205 => 2304, // 44100
         2400 => 2592, // 48000
@@ -179,26 +178,25 @@ fn next_fast_fft(rate: usize) -> usize {
     }
 }
 
+/// Windowing is used to make the signal chunk fade in and out
+///   to prevent discontinuities, which causes spectral leakage (noise tuned to the music).
+/// This function uses the Hann window, which is considered to be a jack-of-all-trades.
+/// One useful property is that 50% overlapping (i.e. window(n) + window(n + rate/2)) == 1.0, so
+///   we get back to the original level of the input if we overlap two FFTs with this offset between them.
+/// Note that window(0, rate) == 0.0 and window(rate - 1, rate) == window(1, rate) != 0.0, so the only zero point is at n == 0.
+///   This is to satisfy some periodicity property/implication, rather than both ends being 0.0
 fn window(rate: usize) -> Box<[f32]> {
-    // Windowing is used to make the signal chunk fade in and out
-    //   to prevent discontinuities, which causes spectral leakage (noise tuned to the music).
-    // This function uses the Hann window, which is considered to be a jack-of-all-trades.
-    // One useful property is that 50% overlapping (i.e. window(n) + window(n + rate/2)) == 1.0, so
-    //   we get back to the original level of the input if we overlap two FFTs with this offset between them.
-    // Note that window(0, rate) == 0.0 and window(rate - 1, rate) == window(1, rate) != 0.0, so the only zero point is at n == 0.
-    //   This is to satisfy some periodicity property/implication, rather than both ends being 0.0
     (0..rate)
         .map(|n| (PI * n as f64 / rate as f64).sin().powi(2) as f32)
         .collect()
 }
 
+/// Align the phase of the left and right channels using the circular mean / true midpoint
+/// Using this method makes the resulting phase match the downmixed signal phase (left + right / 2),
+///   i.e. zero-crossings should match with mid channel
+/// Higher weight towards higher magnitude, so the channel with the higher magnitude doesn't rotate much,
+///   while the smaller magnitude channel may rotate a lot
 fn align(left: &mut Complex<f32>, right: &mut Complex<f32>) {
-    // Align the phase of the left and right channels using the circular mean / true midpoint
-    // Using this method makes the resulting phase match the downmixed signal phase (left + right / 2),
-    //   i.e. zero-crossings should match with mid channel
-    // Higher weight towards higher magnitude, so the channel with the higher magnitude doesn't rotate much,
-    //   while the smaller magnitude channel may rotate a lot
-
     // Circular mean / true midpoint
     #[expect(
         clippy::arithmetic_side_effects,
@@ -212,7 +210,9 @@ fn align(left: &mut Complex<f32>, right: &mut Complex<f32>) {
     let right_sqr = right.norm_sqr();
 
     // Prevent propagation of NaN or infinity
-    if sum_sqr_inv.is_normal() {
+    // Used to be .is_normal(), but subnormal values aren't possible since
+    //   we call .recip() beforehand (i.e. 1.0/f32::MIN_POSITIVE, 1.0/f32::MAX, 1.0/f32::INFINITY == 0.0, 1.0/0.0, 1.0/f32::NAN)
+    if sum_sqr_inv.is_finite() {
         // Equivalent to using cos-sin of atan2(sum)
         *left = sum.scale((left_sqr * sum_sqr_inv).sqrt());
         *right = sum.scale((right_sqr * sum_sqr_inv).sqrt());
@@ -220,8 +220,8 @@ fn align(left: &mut Complex<f32>, right: &mut Complex<f32>) {
         let sum_norm_inv = sum.norm().recip();
         let left_norm = left_sqr.sqrt();
         let right_norm = right_sqr.sqrt();
-        // Check non-normal sum_sqr_inv is recoverable by taking the square root before .recip()
-        if sum_norm_inv.is_normal() {
+        // Check if sum_sqr_inv is recoverable by taking the square root before .recip()
+        if sum_norm_inv.is_finite() {
             *left = sum.scale(left_norm * sum_norm_inv);
             *right = sum.scale(right_norm * sum_norm_inv);
         } else {
@@ -234,7 +234,22 @@ fn align(left: &mut Complex<f32>, right: &mut Complex<f32>) {
     }
 }
 
+/// EBU R 128 Integrated Loudness calculation
+/// Basically a two-pass windowed RMS.
+///   First pass is used to detect and ignore silence at -70dB
+///   Second pass is used to detect and ignore quieter points at the first-pass RMS minus 10dB
+fn gated_rms(samples: &Vec<f32>, rate: u32) -> f64 {
+    let mut ebur128 = EbuR128::new(1_u32, rate, Mode::I).expect("Shouldn't happen");
+    // Planar sucks since it requires an array of channel arrays, so for one channel, it needs an array around it
+    // f64 samples are not needed
+    _ = ebur128.add_frames_f32(&samples.to_owned());
+    let loudness = ebur128.loudness_global().expect("Shouldn't happen");
+
+    10.0_f64.powf(loudness / 20.0_f64)
+}
+
 // TODO: break up into smaller functions
+/// All three processing steps into one function
 fn process_samples(
     planner: &mut RealFftPlanner<f32>,
     data: (Vec<f32>, Vec<f32>),
@@ -252,11 +267,6 @@ fn process_samples(
     let c2r = planner.plan_fft_inverse(fft_size);
     let fft_complex_size = r2c.complex_len();
 
-    // The first bin is the DC bin, which is the average unheard noise
-    // From what we've seen, this should be a real number (C + 0.0i), but it's better to be safe
-    //   by zeroing it out in both axes
-    let new_dc = num_complex::Complex::zero();
-
     // Pre-calculate window function
     let window = window(sample_rate);
 
@@ -267,7 +277,6 @@ fn process_samples(
     // TODO: offset can technically fail original_length is near usize::MAX
     //   would happen if usize == u32 and decoded a 12-hour 96khz file
     let original_length = left_channel.len();
-    let original_length_inv = (original_length as f64).recip() as f32;
     let offset = sample_rate >> 1_usize;
     let offset_vec = vec![0.0_f32; offset];
     let mut not_left_channel = offset_vec.clone();
@@ -309,21 +318,29 @@ fn process_samples(
     processed_not_left.reserve_exact(fft_total);
     processed_not_right.reserve_exact(fft_total);
 
-    // Create scratch FFT for RealFFT
-    // RealFFT uses RustFFT's .process_with_scratch() for its .process() function
+    // Create scratch FFT for `RealFFT`
+    // `RealFFT` uses `RustFFT`'s .process_with_scratch() for its .process() function
     let mut left_fft = r2c.make_output_vec();
     let mut right_fft = r2c.make_output_vec();
     let mut not_left_fft = r2c.make_output_vec();
     let mut not_right_fft = r2c.make_output_vec();
 
-    for chunk in left_channel_chunks
-        .zip(right_channel_chunks)
-        .zip(not_left_channel_chunks.zip(not_right_channel_chunks))
-    {
-        let mut left = chunk.0.0.to_vec();
-        let mut right = chunk.0.1.to_vec();
-        let mut not_left = chunk.1.0.to_vec();
-        let mut not_right = chunk.1.1.to_vec();
+    for (left_chunk, right_chunk, not_left_chunk, not_right_chunk) in izip!(
+        left_channel_chunks,
+        right_channel_chunks,
+        not_left_channel_chunks,
+        not_right_channel_chunks
+    ) {
+        // Seems a bit faster than using .resize()
+        // Repetition is used instead of cloning a premade Vec since .clone() clogs up the flamegraph
+        let mut left = vec![0.0_f32; fft_size.strict_sub(sample_rate)];
+        let mut right = vec![0.0_f32; fft_size.strict_sub(sample_rate)];
+        let mut not_left = vec![0.0_f32; fft_size.strict_sub(sample_rate)];
+        let mut not_right = vec![0.0_f32; fft_size.strict_sub(sample_rate)];
+        left.extend(left_chunk);
+        right.extend(right_chunk);
+        not_left.extend(not_left_chunk);
+        not_right.extend(not_right_chunk);
 
         for index in 0..sample_rate {
             // SAFETY: index never exceeds sample_rate - 1
@@ -338,33 +355,28 @@ fn process_samples(
             *unsafe { not_right.get_unchecked_mut(index) } *= window_multiplier;
         }
 
-        // Zero-pad signal for FFT
-        // It's probably fine not to shrink these, since they're rather small and would reallocate
-        //   in this hot loop
-        left.resize(fft_size, 0.0);
-        right.resize(fft_size, 0.0);
-        not_left.resize(fft_size, 0.0);
-        not_right.resize(fft_size, 0.0);
-
-        // Ignore errors by RealFFT
-        // RustFFT does not return a Result after processing,
-        //   but RealFFT does return Results due to some zero-check
-        //   RealFFT author says to just ignore these in the meantime.
+        // Ignore errors by `RealFFT`
+        // `RustFFT` does not return a Result after processing,
+        //   but `RealFFT` does return Results due to some zero-check
+        //   `RealFFT` author says to just ignore these in the meantime.
         // https://github.com/HEnquist/realfft/issues/41#issuecomment-2050347470
         _ = r2c.process(&mut left, &mut left_fft);
         _ = r2c.process(&mut right, &mut right_fft);
         _ = r2c.process(&mut not_left, &mut not_left_fft);
         _ = r2c.process(&mut not_right, &mut not_right_fft);
 
-        // Remove local DC offset
+        // Remove DC offset in case the noise changes over time
+        // The first bin is the DC bin, which is the average unheard noise
+        // From what we've seen, this should be a real number (C + 0.0i), but it's better to be safe
+        //   by zeroing it out in both axes
         // SAFETY: first element must exist
-        *unsafe { left_fft.get_unchecked_mut(0) } = new_dc;
+        *unsafe { left_fft.get_unchecked_mut(0) } = num_complex::Complex::zero();
         // SAFETY: first element must exist
-        *unsafe { right_fft.get_unchecked_mut(0) } = new_dc;
+        *unsafe { right_fft.get_unchecked_mut(0) } = num_complex::Complex::zero();
         // SAFETY: first element must exist
-        *unsafe { not_left_fft.get_unchecked_mut(0) } = new_dc;
+        *unsafe { not_left_fft.get_unchecked_mut(0) } = num_complex::Complex::zero();
         // SAFETY: first element must exist
-        *unsafe { not_right_fft.get_unchecked_mut(0) } = new_dc;
+        *unsafe { not_right_fft.get_unchecked_mut(0) } = num_complex::Complex::zero();
 
         for index in 1..fft_complex_size {
             // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
@@ -430,42 +442,43 @@ fn process_samples(
     processed_left.shrink_to(original_length);
     processed_right.shrink_to(original_length);
 
+    // Average out the loudness of the left and right channels
+    // Need to .sqrt() the RMS to get the per-sample multiplier instead of the per-RMS multiplier
+    let left_rms_sqrt = gated_rms(&processed_left, rate).sqrt();
+    let right_rms_sqrt = gated_rms(&processed_right, rate).sqrt();
+    let left_equalizer = (right_rms_sqrt / left_rms_sqrt) as f32;
+    let right_equalizer = (left_rms_sqrt / right_rms_sqrt) as f32;
+    for index in 0..original_length {
+        // SAFETY: index bounds check never fails
+        *unsafe { processed_left.get_unchecked_mut(index) } *= left_equalizer;
+        // SAFETY: index bounds check never fails
+        *unsafe { processed_right.get_unchecked_mut(index) } *= right_equalizer;
+    }
+
+    /*
     // Remove overall DC after all local DC was removed
     // DC is just the average of the whole signal
-    // RMS averaging below needs f64 instead of f32, but this DC doesn't need it,
-    //   probably because each sample needs to be squared, reducing usable significant digits
-    let left_dc = processed_left.clone().iter().sum::<f32>() * original_length_inv;
-    let right_dc = processed_right.clone().iter().sum::<f32>() * original_length_inv;
+    let left_dc = processed_left.clone().iter().sum::<f32>() / original_length as f32;
+    let right_dc = processed_right.clone().iter().sum::<f32>() / original_length as f32;
     for index in 0..original_length {
         // SAFETY: index bounds check never fails
         *unsafe { processed_left.get_unchecked_mut(index) } -= left_dc;
         // SAFETY: index bounds check never fails
         *unsafe { processed_right.get_unchecked_mut(index) } -= right_dc;
     }
-
-    // Average out the RMS of the left and right channels
-    // No need to divide by original_length to get the mean, nor take the square root,
-    //   since the divisions cancel out later and the square roots are made later
-    // Cast from f32 to f64 used to prevent imprecision when adding lots of f32,
-    //   where channels would differ by about 0.02dB / 0.25%
-    let left_s = processed_left.clone().iter().fold(0.0_f64, |acc, samp| {
-        f64::from(*samp).mul_add(f64::from(*samp), acc)
-    });
-    let right_s = processed_right.clone().iter().fold(0.0_f64, |acc, samp| {
-        f64::from(*samp).mul_add(f64::from(*samp), acc)
-    });
-    // First square root is to get the multiplier when applied to s^2,
-    //   second square root is to get the multiplier when applied to just s.
-    // .sqrt().sqrt() is used over .powf(0.25) since .sqrt() uses infinite precision
-    let left_rms_sqrt = left_s.sqrt().sqrt();
-    let right_rms_sqrt = right_s.sqrt().sqrt();
-    let left_equalizer = right_rms_sqrt / left_rms_sqrt;
-    let right_equalizer = left_rms_sqrt / right_rms_sqrt;
+    */
+    // Add DC noise to reduce peak levels
+    // It's still good to remove DC in the FFT, since this added DC noise would only cause
+    //   problems between tracks instead of within the same track
+    let (left_min, left_max) = processed_left.iter().minmax().into_option().unwrap();
+    let (right_min, right_max) = processed_right.iter().minmax().into_option().unwrap();
+    let left_dc = (*left_min + *left_max) * 0.5_f32;
+    let right_dc = (*right_min + *right_max) * 0.5_f32;
     for index in 0..original_length {
         // SAFETY: index bounds check never fails
-        *unsafe { processed_left.get_unchecked_mut(index) } *= left_equalizer as f32;
+        *unsafe { processed_left.get_unchecked_mut(index) } -= left_dc;
         // SAFETY: index bounds check never fails
-        *unsafe { processed_right.get_unchecked_mut(index) } *= right_equalizer as f32;
+        *unsafe { processed_right.get_unchecked_mut(index) } -= right_dc;
     }
 
     // Overall processing is done
@@ -476,6 +489,7 @@ fn process_samples(
     )
 }
 
+/// Save processed audio to the output using `hound`
 fn save_audio(file_path: &Path, audio: &(Box<[f32]>, Box<[f32]>), rate: u32) {
     // TODO: add simple functionality for mono signals?
     // Might be a lot of work for something you can re-render to stereo in foobar2000
@@ -501,9 +515,9 @@ fn save_audio(file_path: &Path, audio: &(Box<[f32]>, Box<[f32]>), rate: u32) {
     writer.finalize().expect("Could not finalize WAV file");
 }
 
+/// Recursive file path retriever from `StackOverflow`
+/// TODO: check if there's a newer std function or crate to do this
 fn get_paths(directory: path::PathBuf) -> io::Result<Vec<path::PathBuf>> {
-    // Recursive file path retriever from StackOverflow
-    // TODO: check if there's a newer std function or crate to do this
     let mut entries: Vec<path::PathBuf> = vec![];
     let folder_read = fs::read_dir(directory)?;
 
@@ -523,6 +537,7 @@ fn get_paths(directory: path::PathBuf) -> io::Result<Vec<path::PathBuf>> {
     Ok(entries)
 }
 
+/// Main function to execute
 fn main() -> Result<(), Error> {
     // Keeping the time for benchmarking
     let time = time::Instant::now();
@@ -535,7 +550,7 @@ fn main() -> Result<(), Error> {
             println!("Notice: Inputs folder created. Copy audio files here to process them.");
             return Ok(());
         }
-        // Symphonia has a wrapper for IoErrors
+        // `Symphonia` has a wrapper for IoErrors
         Err(err) => return Err(Error::IoError(err)),
     }
 
@@ -561,7 +576,7 @@ fn main() -> Result<(), Error> {
                 channels = data.0;
                 sample_rate = data.1;
             }
-            // The following errors usually happen if Symphonia attempts to open a .jpg or .png
+            // The following errors usually happen if `Symphonia` attempts to open a .jpg or .png
             Err(Error::IoError(err)) => {
                 if err.kind() == io::ErrorKind::UnexpectedEof {
                     println!("  Invalid or unsupported audio, sent to output.");

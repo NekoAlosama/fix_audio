@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+ebur128 = "0.1.10"
 hound = "3.5.1"
+itertools = "0.14.0"
 realfft = { version = "3.5.0", features = ["avx", "neon", "sse"] }
 symphonia = { version = "0.5.4", features = ["opt-simd", "all"] }
 
@@ -19,3 +21,13 @@ panic = "abort"
 [profile.flamegraph]
 inherits = "release"
 debug = true
+
+[lints.clippy]
+complexity = "warn"
+correctness = "warn"
+nursery = "warn"
+pedantic = "warn"
+perf = "warn"
+style = "warn"
+suspicious = "warn"
+restriction = "warn"
