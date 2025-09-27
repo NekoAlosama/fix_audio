@@ -7,16 +7,20 @@ Currently, this program takes in stereo audio files (input folder created on fir
   * Use case: switching between a mono speaker to a car stereo
     * Prevents per-frequency phase cancellation for a better downmix to mono
     * Heavily reduces the perceived stereo width, but instrument placement / channel-specific sounds are preserved
-* Removes DC bias / inaudible 0.0 hz noise
-  * Concept based on iZotope RX 11's "Filter DC Offset" option in its "De-hum" module, automated with RX 11's "Batch Processor"
-  * Use case: loudness stats like RMS and peak level could be incorrect because of DC noise
-    * Generally caused by amateur recording, mixing, and mastering (i.e. YAYAYI - track 13 from self-titled)
-    * Noise also causes audible noise/clicks/artifacts when converting to lossy formats or on speaker playback
 * Averages the loudness of the left and right channel
   * Concept based on iZotope RX 11's "Azimuth" module, can't be automated
   * Use case: ensure that one channel doesn't overpower the other over the course of a track
     * Uses the EBU R 128 Integrated Loudness, while RX 11 uses plain RMS
     * Plain RMS is affected by DC bias
+* (Unimplemented: Removes DC bias / inaudible 0.0 hz noise)
+  * Current known implementation causes clicks/jumps/artifacts
+  * Concept based on iZotope RX 11's "Filter DC Offset" option in its "De-hum" module, automated with RX 11's "Batch Processor"
+  * Use case: noise may cause audible noise/clicks/artifacts/imbalances with further processing
+    * Loudness stats like RMS and peak level will be incorrect because of DC noise
+    * Generally caused by amateur recording, mixing, and mastering (i.e. YAYAYI - track 13 from self-titled)
+* Add DC noise to reduce peak levels
+  * Currently being used to test where and when DC noise is noticable
+  * Use case: Reduce peak levels while keeping the same loudness
 
 Processed audio files are sent to the output folder as 32-bit floating-point .wav files. Non-audio files (covers, documents, etc.) are transfered to the output folder. The original audio files are kept in the input folder, so remember to delete them if you don't need to re-run the program with changes.
 

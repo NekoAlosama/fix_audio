@@ -36,12 +36,8 @@
 // Imports
 use core::f64::consts::PI;
 use ebur128::{EbuR128, Mode};
-use itertools::izip;
-use realfft::{
-    RealFftPlanner,
-    num_complex::{self, Complex},
-    num_traits::Zero,
-};
+use itertools::{Itertools as _, izip};
+use realfft::{RealFftPlanner, num_complex::Complex};
 use std::{
     fs,
     io::{self, Write as _},
@@ -183,11 +179,15 @@ fn next_fast_fft(rate: usize) -> usize {
 /// This function uses the Hann window, which is considered to be a jack-of-all-trades.
 /// One useful property is that 50% overlapping (i.e. window(n) + window(n + rate/2)) == 1.0, so
 ///   we get back to the original level of the input if we overlap two FFTs with this offset between them.
-/// Note that window(0, rate) == 0.0 and window(rate - 1, rate) == window(1, rate) != 0.0, so the only zero point is at n == 0.
-///   This is to satisfy some periodicity property/implication, rather than both ends being 0.0
+/// Zero points are added to the beginning and end of the window at the FFT so some perodicity property is satisfied
+/// Here, no values should equal zero to prevent lost information
 fn window(rate: usize) -> Box<[f32]> {
     (0..rate)
-        .map(|n| (PI * n as f64 / rate as f64).sin().powi(2) as f32)
+        .map(|n| {
+            (PI * n.strict_add(1_usize) as f64 / rate.strict_add(1_usize) as f64)
+                .sin()
+                .powi(2) as f32
+        })
         .collect()
 }
 
@@ -331,20 +331,30 @@ fn process_samples(
         not_left_channel_chunks,
         not_right_channel_chunks
     ) {
-        // Seems a bit faster than using .resize()
-        // Repetition is used instead of cloning a premade Vec since .clone() clogs up the flamegraph
-        let mut left = vec![0.0_f32; fft_size.strict_sub(sample_rate)];
-        let mut right = vec![0.0_f32; fft_size.strict_sub(sample_rate)];
-        let mut not_left = vec![0.0_f32; fft_size.strict_sub(sample_rate)];
-        let mut not_right = vec![0.0_f32; fft_size.strict_sub(sample_rate)];
+        let mut left = vec![];
+        let mut right = vec![];
+        let mut not_left = vec![];
+        let mut not_right = vec![];
+        left.reserve_exact(fft_size);
+        right.reserve_exact(fft_size);
+        not_left.reserve_exact(fft_size);
+        not_right.reserve_exact(fft_size);
+        left.push(0.0_f32);
+        right.push(0.0_f32);
+        not_left.push(0.0_f32);
+        not_right.push(0.0_f32);
         left.extend(left_chunk);
         right.extend(right_chunk);
         not_left.extend(not_left_chunk);
         not_right.extend(not_right_chunk);
+        left.resize(fft_size, 0.0_f32);
+        right.resize(fft_size, 0.0_f32);
+        not_left.resize(fft_size, 0.0_f32);
+        not_right.resize(fft_size, 0.0_f32);
 
-        for index in 0..sample_rate {
+        for index in 1..(sample_rate.strict_add(1_usize)) {
             // SAFETY: index never exceeds sample_rate - 1
-            let window_multiplier = *unsafe { window.get_unchecked(index) };
+            let window_multiplier = *unsafe { window.get_unchecked(index.strict_sub(1_usize)) };
             // SAFETY: index never exceeds sample_rate - 1
             *unsafe { left.get_unchecked_mut(index) } *= window_multiplier;
             // SAFETY: index never exceeds sample_rate - 1
@@ -365,19 +375,9 @@ fn process_samples(
         _ = r2c.process(&mut not_left, &mut not_left_fft);
         _ = r2c.process(&mut not_right, &mut not_right_fft);
 
-        // Remove DC offset in case the noise changes over time
         // The first bin is the DC bin, which is the average unheard noise
-        // From what we've seen, this should be a real number (C + 0.0i), but it's better to be safe
-        //   by zeroing it out in both axes
-        // SAFETY: first element must exist
-        *unsafe { left_fft.get_unchecked_mut(0) } = num_complex::Complex::zero();
-        // SAFETY: first element must exist
-        *unsafe { right_fft.get_unchecked_mut(0) } = num_complex::Complex::zero();
-        // SAFETY: first element must exist
-        *unsafe { not_left_fft.get_unchecked_mut(0) } = num_complex::Complex::zero();
-        // SAFETY: first element must exist
-        *unsafe { not_right_fft.get_unchecked_mut(0) } = num_complex::Complex::zero();
-
+        // Unfortunately, it's a bad idea to set the value to zero, since
+        //   it causes jumps/clicks/discontinuities between consecutive FFTs
         for index in 1..fft_complex_size {
             // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
             let left_fft_index = unsafe { left_fft.get_unchecked_mut(index) };
@@ -397,7 +397,7 @@ fn process_samples(
         _ = c2r.process(&mut not_right_fft, &mut not_right);
 
         // FFT zero-padding is ignored with this `for`` loop
-        for index in 0..sample_rate {
+        for index in 1..(sample_rate.strict_add(1_usize)) {
             // SAFETY: sample rate is less than left.len, so index should always work
             let left_index = *unsafe { left.get_unchecked(index) };
             // SAFETY: sample rate is less than left.len, so index should always work
@@ -464,6 +464,18 @@ fn process_samples(
         *unsafe { processed_left.get_unchecked_mut(index) } *= left_equalizer;
         // SAFETY: index bounds check never fails
         *unsafe { processed_right.get_unchecked_mut(index) } *= right_equalizer;
+    }
+
+    // Add DC noise to reduce peak levels
+    let (left_min, left_max) = processed_left.iter().minmax().into_option().unwrap();
+    let (right_min, right_max) = processed_right.iter().minmax().into_option().unwrap();
+    let left_dc = (*left_min + *left_max) * 0.5_f32;
+    let right_dc = (*right_min + *right_max) * 0.5_f32;
+    for index in 0..original_length {
+        // SAFETY: index bounds check never fails
+        *unsafe { processed_left.get_unchecked_mut(index) } -= left_dc;
+        // SAFETY: index bounds check never fails
+        *unsafe { processed_right.get_unchecked_mut(index) } -= right_dc;
     }
 
     // Overall processing is done
