@@ -10,8 +10,8 @@ Currently, this program takes in stereo audio files (input folder created on fir
 * Removes DC bias / inaudible 0.0 hz noise
   * Concept based on iZotope RX 11's "Filter DC Offset" option in its "De-hum" module, automated with RX 11's "Batch Processor"
   * Use case: loudness stats like RMS and peak level could be incorrect because of DC noise
-    * Generally caused by amateur mixing and mastering (i.e. YAYAYI - track 13 from self-titled)
-    * Noise may also cause audible noise/artifacts when converting to lossy formats or on speaker playback
+    * Generally caused by amateur recording, mixing, and mastering (i.e. YAYAYI - track 13 from self-titled)
+    * Noise also causes audible noise/clicks/artifacts when converting to lossy formats or on speaker playback
 * Averages the loudness of the left and right channel
   * Concept based on iZotope RX 11's "Azimuth" module, can't be automated
   * Use case: ensure that one channel doesn't overpower the other over the course of a track
@@ -38,10 +38,6 @@ __Things to do__:
   * Make sure to bypass phase alignment
 * Add support for videos with an audio track (.webm, .mkv)
   * Symphonia doesn't have a demuxer example/tutorial?
-* Consider locking final DC noise removal in a feature flag or similar
-  * Local DC bias is already removed through FFT
-  * Currently, overall DC noise is added back to reduce peak levels
-    * DC noise removal should be used if more processing is needed or if added noise causes problems
 * Make code more idiomatic
 * Increase program efficiency
   * The current memory usage is good, so the main feature to implement is multithreading

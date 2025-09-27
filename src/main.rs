@@ -36,7 +36,7 @@
 // Imports
 use core::f64::consts::PI;
 use ebur128::{EbuR128, Mode};
-use itertools::{Itertools as _, izip};
+use itertools::izip;
 use realfft::{
     RealFftPlanner,
     num_complex::{self, Complex},
@@ -442,6 +442,17 @@ fn process_samples(
     processed_left.shrink_to(original_length);
     processed_right.shrink_to(original_length);
 
+    // Remove overall DC after all local DC was removed
+    // DC is just the average of the whole signal
+    let left_dc = processed_left.clone().iter().sum::<f32>() / original_length as f32;
+    let right_dc = processed_right.clone().iter().sum::<f32>() / original_length as f32;
+    for index in 0..original_length {
+        // SAFETY: index bounds check never fails
+        *unsafe { processed_left.get_unchecked_mut(index) } -= left_dc;
+        // SAFETY: index bounds check never fails
+        *unsafe { processed_right.get_unchecked_mut(index) } -= right_dc;
+    }
+
     // Average out the loudness of the left and right channels
     // Need to .sqrt() the RMS to get the per-sample multiplier instead of the per-RMS multiplier
     let left_rms_sqrt = gated_rms(&processed_left, rate).sqrt();
@@ -453,32 +464,6 @@ fn process_samples(
         *unsafe { processed_left.get_unchecked_mut(index) } *= left_equalizer;
         // SAFETY: index bounds check never fails
         *unsafe { processed_right.get_unchecked_mut(index) } *= right_equalizer;
-    }
-
-    /*
-    // Remove overall DC after all local DC was removed
-    // DC is just the average of the whole signal
-    let left_dc = processed_left.clone().iter().sum::<f32>() / original_length as f32;
-    let right_dc = processed_right.clone().iter().sum::<f32>() / original_length as f32;
-    for index in 0..original_length {
-        // SAFETY: index bounds check never fails
-        *unsafe { processed_left.get_unchecked_mut(index) } -= left_dc;
-        // SAFETY: index bounds check never fails
-        *unsafe { processed_right.get_unchecked_mut(index) } -= right_dc;
-    }
-    */
-    // Add DC noise to reduce peak levels
-    // It's still good to remove DC in the FFT, since this added DC noise would only cause
-    //   problems between tracks instead of within the same track
-    let (left_min, left_max) = processed_left.iter().minmax().into_option().unwrap();
-    let (right_min, right_max) = processed_right.iter().minmax().into_option().unwrap();
-    let left_dc = (*left_min + *left_max) * 0.5_f32;
-    let right_dc = (*right_min + *right_max) * 0.5_f32;
-    for index in 0..original_length {
-        // SAFETY: index bounds check never fails
-        *unsafe { processed_left.get_unchecked_mut(index) } -= left_dc;
-        // SAFETY: index bounds check never fails
-        *unsafe { processed_right.get_unchecked_mut(index) } -= right_dc;
     }
 
     // Overall processing is done
