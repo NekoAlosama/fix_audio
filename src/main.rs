@@ -47,7 +47,7 @@ use std::{
 use symphonia::{
     core::{
         audio::SampleBuffer,
-        codecs::DecoderOptions,
+        codecs::{CODEC_TYPE_NULL, DecoderOptions},
         errors::Error,
         formats::FormatOptions,
         io::{MediaSourceStream, MediaSourceStreamOptions},
@@ -93,7 +93,11 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Error> 
     let mut format = probe_result.format;
 
     // 7
-    let track = format.default_track().unwrap();
+    let track = format
+        .tracks()
+        .iter()
+        .find(|track| track.codec_params.codec != CODEC_TYPE_NULL)
+        .expect("no supported audio tracks");
 
     // 8
     let mut decoder = code_registry.make(&track.codec_params, &DecoderOptions::default())?;
@@ -104,7 +108,7 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Error> 
     let mut right_samples: Vec<f32> = vec![];
 
     let mut sample_buf = None;
-    let mut meta_spec = 0;
+    let mut sample_rate = 0;
 
     // 9
     // 10
@@ -115,7 +119,7 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Error> 
                 Ok(audio_buf) => {
                     if sample_buf.is_none() {
                         let spec = *audio_buf.spec();
-                        meta_spec = spec.rate;
+                        sample_rate = spec.rate;
 
                         // SAFETY: usize to u64 should never fail
                         let duration: u64 =
@@ -127,16 +131,13 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Error> 
                     if let Some(ref mut buf) = sample_buf {
                         buf.copy_planar_ref(audio_buf);
                         let length = buf.samples().len();
-                        // Unsure if reserving space is necessary due to extend_from_slice later
-                        let reservation = length >> 1_usize; // div by 2
-                        left_samples.reserve(reservation);
-                        right_samples.reserve(reservation);
+                        let mid = length >> 1_usize; // div by 2
 
                         // SAFETY: reservation < length
-                        let (left, right) =
-                            unsafe { buf.samples().split_at_unchecked(reservation) };
-                        left_samples.extend_from_slice(left);
-                        right_samples.extend_from_slice(right);
+                        let (left, right) = unsafe { buf.samples().split_at_unchecked(mid) };
+                        // .extend will reserve space for the _samples Vecs
+                        left_samples.extend(left);
+                        right_samples.extend(right);
                     }
                 }
                 // For some reason, `Symphonia` is fine if the decode doesn't work?
@@ -146,9 +147,10 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Error> 
             }
         }
     }
+
     // No need to call .shrink_to_fit or care about over-allocation
     // TODO: return error if fft_total would be larger than usize::MAX
-    Ok(((left_samples, right_samples), meta_spec))
+    Ok(((left_samples, right_samples), sample_rate))
 }
 
 // TODO: add algorithm for arbitrary-length FFT?
@@ -257,8 +259,18 @@ fn process_samples(
 ) -> (Box<[f32]>, Box<[f32]>) {
     let mut left_channel = data.0;
     let mut right_channel = data.1;
+    let original_length = left_channel.len();
     // Force minimum reconstructed frequency to 20 hz
     let sample_rate = (f64::from(rate) / 20.0_f64) as usize;
+
+    // Remove DC before processing
+    // DC might affect magnitude of 20 Hz and interpolated values close to it
+    let left_dc = left_channel.clone().iter().sum::<f32>() / original_length as f32;
+    let right_dc = right_channel.clone().iter().sum::<f32>() / original_length as f32;
+    for (left, right) in izip!(left_channel.iter_mut(), right_channel.iter_mut()) {
+        *left -= left_dc;
+        *right -= right_dc;
+    }
 
     // Best to do a small FFT to prevent transient smearing
     let fft_size = next_fast_fft(sample_rate);
@@ -276,21 +288,16 @@ fn process_samples(
     // The effect is insignificant anyways, giving a 0.0712% or 0.00619dB difference
     // TODO: offset can technically fail original_length is near usize::MAX
     //   would happen if usize == u32 and decoded a 12-hour 96khz file
-    let original_length = left_channel.len();
     let offset = sample_rate >> 1_usize;
     let offset_vec = vec![0.0_f32; offset];
     let mut not_left_channel = offset_vec.clone();
     let mut not_right_channel = offset_vec;
     not_left_channel.append(&mut left_channel.clone());
     not_right_channel.append(&mut right_channel.clone());
-    let offset_total = not_left_channel.len();
-    // assert_eq!(offset_total, original_length + offset);
-    left_channel.resize(offset_total, 0.0);
-    right_channel.resize(offset_total, 0.0);
 
     // The algorithm I want to use will chunk each signal by sample_rate, so it's better to round up
     //   to the next multiple so we can use ChunksExact and have no remainder
-    let fft_total = offset_total.next_multiple_of(sample_rate);
+    let fft_total = not_left_channel.len().next_multiple_of(sample_rate);
     left_channel.resize(fft_total, 0.0);
     right_channel.resize(fft_total, 0.0);
     not_left_channel.resize(fft_total, 0.0);
@@ -352,7 +359,7 @@ fn process_samples(
         not_left.resize(fft_size, 0.0_f32);
         not_right.resize(fft_size, 0.0_f32);
 
-        for index in 1..(sample_rate.strict_add(1_usize)) {
+        for index in 1..=sample_rate {
             // SAFETY: index never exceeds sample_rate - 1
             let window_multiplier = *unsafe { window.get_unchecked(index.strict_sub(1_usize)) };
             // SAFETY: index never exceeds sample_rate - 1
@@ -396,22 +403,35 @@ fn process_samples(
         _ = c2r.process(&mut not_left_fft, &mut not_left);
         _ = c2r.process(&mut not_right_fft, &mut not_right);
 
-        // FFT zero-padding is ignored with this `for`` loop
-        for index in 1..(sample_rate.strict_add(1_usize)) {
-            // SAFETY: sample rate is less than left.len, so index should always work
-            let left_index = *unsafe { left.get_unchecked(index) };
-            // SAFETY: sample rate is less than left.len, so index should always work
-            let right_index = *unsafe { right.get_unchecked(index) };
-            // SAFETY: sample rate is less than left.len, so index should always work
-            let not_left_index = *unsafe { not_left.get_unchecked(index) };
-            // SAFETY: sample rate is less than left.len, so index should always work
-            let not_right_index = *unsafe { not_right.get_unchecked(index) };
-            // Normalize FFT values to finish them off
-            processed_left.push(left_index * recip_fft);
-            processed_right.push(right_index * recip_fft);
-            processed_not_left.push(not_left_index * recip_fft);
-            processed_not_right.push(not_right_index * recip_fft);
+        // Remove remaining FFT silence
+        left.truncate(sample_rate.strict_add(1));
+        right.truncate(sample_rate.strict_add(1));
+        not_left.truncate(sample_rate.strict_add(1));
+        not_right.truncate(sample_rate.strict_add(1));
+
+        // Remove first sample, as it should be silence
+        // This should be faster than using a VecDeque since we're just removing one time
+        left.remove(0);
+        right.remove(0);
+        not_left.remove(0);
+        not_right.remove(0);
+
+        for (left_samp, right_samp, not_left_samp, not_right_samp) in izip!(
+            left.iter_mut(),
+            right.iter_mut(),
+            not_left.iter_mut(),
+            not_right.iter_mut()
+        ) {
+            *left_samp *= recip_fft;
+            *right_samp *= recip_fft;
+            *not_left_samp *= recip_fft;
+            *not_right_samp *= recip_fft;
         }
+
+        processed_left.append(&mut left);
+        processed_right.append(&mut right);
+        processed_not_left.append(&mut not_left);
+        processed_not_right.append(&mut not_right);
     }
 
     drop(left_fft);
@@ -442,15 +462,12 @@ fn process_samples(
     processed_left.shrink_to(original_length);
     processed_right.shrink_to(original_length);
 
-    // Remove overall DC after all local DC was removed
-    // DC is just the average of the whole signal
-    let left_dc = processed_left.clone().iter().sum::<f32>() / original_length as f32;
-    let right_dc = processed_right.clone().iter().sum::<f32>() / original_length as f32;
-    for index in 0..original_length {
-        // SAFETY: index bounds check never fails
-        *unsafe { processed_left.get_unchecked_mut(index) } -= left_dc;
-        // SAFETY: index bounds check never fails
-        *unsafe { processed_right.get_unchecked_mut(index) } -= right_dc;
+    // Remove DC after processing
+    let processed_left_dc = processed_left.clone().iter().sum::<f32>() / original_length as f32;
+    let processed_right_dc = processed_right.clone().iter().sum::<f32>() / original_length as f32;
+    for (left, right) in izip!(processed_left.iter_mut(), processed_right.iter_mut()) {
+        *left -= processed_left_dc;
+        *right -= processed_right_dc;
     }
 
     // Average out the loudness of the left and right channels
@@ -459,23 +476,19 @@ fn process_samples(
     let right_rms_sqrt = gated_rms(&processed_right, rate).sqrt();
     let left_equalizer = (right_rms_sqrt / left_rms_sqrt) as f32;
     let right_equalizer = (left_rms_sqrt / right_rms_sqrt) as f32;
-    for index in 0..original_length {
-        // SAFETY: index bounds check never fails
-        *unsafe { processed_left.get_unchecked_mut(index) } *= left_equalizer;
-        // SAFETY: index bounds check never fails
-        *unsafe { processed_right.get_unchecked_mut(index) } *= right_equalizer;
+    for (left, right) in izip!(processed_left.iter_mut(), processed_right.iter_mut()) {
+        *left *= left_equalizer;
+        *right *= right_equalizer;
     }
 
     // Add DC noise to reduce peak levels
     let (left_min, left_max) = processed_left.iter().minmax().into_option().unwrap();
     let (right_min, right_max) = processed_right.iter().minmax().into_option().unwrap();
-    let left_dc = (*left_min + *left_max) * 0.5_f32;
-    let right_dc = (*right_min + *right_max) * 0.5_f32;
-    for index in 0..original_length {
-        // SAFETY: index bounds check never fails
-        *unsafe { processed_left.get_unchecked_mut(index) } -= left_dc;
-        // SAFETY: index bounds check never fails
-        *unsafe { processed_right.get_unchecked_mut(index) } -= right_dc;
+    let new_left_dc = (*left_min + *left_max) * 0.5_f32;
+    let new_right_dc = (*right_min + *right_max) * 0.5_f32;
+    for (left, right) in izip!(processed_left.iter_mut(), processed_right.iter_mut()) {
+        *left -= new_left_dc;
+        *right -= new_right_dc;
     }
 
     // Overall processing is done

@@ -28,15 +28,18 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
 __Known problems I can't fix__:
 * Symphonia 0.5.4 doesn't support files above 96khz
   * Fixed in dev-0.6 branch, but that branch is unstable / unusable
-* Cannot copy tags from input to output (lack of ecosystem support?)
-  * Symphonia only supports tag reading
-  * hound does not support writing .wav Vorbis tags
+* Symphonia 0.5.4 doesn't support MP3 delay and padding
+  * Decoded MP3 files are longer than they should and aren't gapless
+* Alignment may introduce clicks
+  * Possible that original audio had the clicks, but were out-of-phase
 * FFT introduces relatively minor transient smearing / pre-echo
   * Problem tracks:
     * SOPHIE - "MSMSMSM": Transient hi-hat of <0.1s, right channel delayed by ~0.02s
 
 
 __Things to do__:
+* Copy tags from input to output
+  * Best library seems to be `lofty-rs`
 * Add support for mono files
   * Force upmixing to stereo?
   * Make sure to bypass phase alignment
