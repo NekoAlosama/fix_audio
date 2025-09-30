@@ -46,13 +46,11 @@ use std::{
 };
 use symphonia::{
     core::{
-        audio::SampleBuffer,
-        codecs::{CODEC_TYPE_NULL, DecoderOptions},
+        codecs::audio::AudioDecoderOptions,
         errors::Error,
-        formats::FormatOptions,
+        formats::{FormatOptions, TrackType, probe::Hint},
         io::{MediaSourceStream, MediaSourceStreamOptions},
         meta::MetadataOptions,
-        probe::Hint,
     },
     default,
 };
@@ -84,60 +82,49 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Error> 
 
     // 5
     // 6
-    let probe_result = probe.format(
+    let mut format = probe.probe(
         Hint::new().with_extension("flac"),
         mss,
-        &FormatOptions::default(),
-        &MetadataOptions::default(),
+        FormatOptions::default(),
+        MetadataOptions::default(),
     )?;
-    let mut format = probe_result.format;
 
     // 7
-    let track = format
-        .tracks()
-        .iter()
-        .find(|track| track.codec_params.codec != CODEC_TYPE_NULL)
-        .expect("no supported audio tracks");
+    let track = format.default_track(TrackType::Audio).unwrap();
 
     // 8
-    let mut decoder = code_registry.make(&track.codec_params, &DecoderOptions::default())?;
+    let mut decoder = code_registry.make_audio_decoder(
+        // Don't know why the two unwraps are
+        track.codec_params.as_ref().unwrap().audio().unwrap(),
+        &AudioDecoderOptions::default(),
+    )?;
 
     let track_id = track.id;
 
     let mut left_samples: Vec<f32> = vec![];
     let mut right_samples: Vec<f32> = vec![];
 
-    let mut sample_buf = None;
+    let mut sample_buf: Vec<f32> = vec![];
     let mut sample_rate = 0;
 
     // 9
     // 10
     // 11
-    while let Ok(packet) = format.next_packet() {
+    while let Ok(Some(packet)) = format.next_packet() {
         if packet.track_id() == track_id {
             match decoder.decode(&packet) {
                 Ok(audio_buf) => {
-                    if sample_buf.is_none() {
-                        let spec = *audio_buf.spec();
-                        sample_rate = spec.rate;
-
-                        // SAFETY: usize to u64 should never fail
-                        let duration: u64 =
-                            unsafe { audio_buf.capacity().try_into().unwrap_unchecked() };
-
-                        sample_buf = Some(SampleBuffer::<f32>::new(duration, spec));
+                    if sample_rate == 0 {
+                        sample_rate = audio_buf.spec().rate();
                     }
-
-                    if let Some(ref mut buf) = sample_buf {
-                        buf.copy_planar_ref(audio_buf);
-                        let length = buf.samples().len();
-                        let mid = length >> 1_usize; // div by 2
-
-                        // SAFETY: reservation < length
-                        let (left, right) = unsafe { buf.samples().split_at_unchecked(mid) };
-                        // .extend will reserve space for the _samples Vecs
-                        left_samples.extend(left);
-                        right_samples.extend(right);
+                    // The API for planar samples sucks
+                    sample_buf.resize(audio_buf.samples_interleaved(), 0.0);
+                    audio_buf.copy_to_slice_interleaved(&mut sample_buf);
+                    for chunk in sample_buf.chunks(2) {
+                        // SAFETY: chunk.len() > 1
+                        left_samples.push(*unsafe { chunk.get_unchecked(0) });
+                        // SAFETY: chunk.len() > 1
+                        right_samples.push(*unsafe { chunk.get_unchecked(1) });
                     }
                 }
                 // For some reason, `Symphonia` is fine if the decode doesn't work?
@@ -158,20 +145,13 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Error> 
 /// `RustFFT` likes FFT lengths which are powers of 2 multiplied with powers of 3
 /// We'll zero-pad the seconds anyway
 fn next_fast_fft(rate: usize) -> usize {
-    #[expect(
-        clippy::unimplemented,
-        reason = "`symphonia` 0.5.4 only supports 3 sample rates"
-    )]
     match rate {
-        // Sample rate is divided by 20
-        // Commented values are currently unsupported by `Symphonia` 0.5.4
-        //   but are expected to be supported in dev-0.6
-        2205 => 2304, // 44100
-        2400 => 2592, // 48000
-        // 4410 => 4608,  // 88200
-        4800 => 5184, // 96000
-        // 8820 => 9216,  // 176400
-        // 9600 => 10368, // 192000
+        2205 => 2304,  // 44100
+        2400 => 2592,  // 48000
+        4410 => 4608,  // 88200
+        4800 => 5184,  // 96000
+        8820 => 9216,  // 176400
+        9600 => 10368, // 192000
         _ => unimplemented!(),
     }
 }

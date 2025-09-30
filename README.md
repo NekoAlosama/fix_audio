@@ -26,10 +26,10 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
 
 ## Reflection
 __Known problems I can't fix__:
-* Symphonia 0.5.4 doesn't support files above 96khz
-  * Fixed in dev-0.6 branch, but that branch is unstable / unusable
-* Symphonia 0.5.4 doesn't support MP3 delay and padding
-  * Decoded MP3 files are longer than they should and aren't gapless
+* Symphonia dev-0.6 doesn't support certain features
+  * Try converting music files to .wav
+    * .opus files or video files containing audio in general
+    * .mp3 file output is longer than it should
 * Alignment may introduce clicks
   * Possible that original audio had the clicks, but were out-of-phase
 * FFT introduces relatively minor transient smearing / pre-echo
@@ -43,8 +43,6 @@ __Things to do__:
 * Add support for mono files
   * Force upmixing to stereo?
   * Make sure to bypass phase alignment
-* Add support for videos with an audio track (.webm, .mkv)
-  * Symphonia doesn't have a demuxer example/tutorial?
 * Make code more idiomatic
 * Increase program efficiency
   * The current memory usage is good, so the main feature to implement is multithreading
