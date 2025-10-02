@@ -120,12 +120,12 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Error> 
                     // The API for planar samples sucks
                     sample_buf.resize(audio_buf.samples_interleaved(), 0.0);
                     audio_buf.copy_to_slice_interleaved(&mut sample_buf);
-                    for chunk in sample_buf.chunks(2) {
+                    sample_buf.chunks_exact(2).for_each(|chunk| {
                         // SAFETY: chunk.len() > 1
                         left_samples.push(*unsafe { chunk.get_unchecked(0) });
                         // SAFETY: chunk.len() > 1
                         right_samples.push(*unsafe { chunk.get_unchecked(1) });
-                    }
+                    });
                 }
                 // For some reason, `Symphonia` is fine if the decode doesn't work?
                 // like with malformed data or something
@@ -245,12 +245,12 @@ fn process_samples(
 
     // Remove DC before processing
     // DC might affect magnitude of 20 Hz and interpolated values close to it
-    let left_dc = left_channel.clone().iter().sum::<f32>() / original_length as f32;
-    let right_dc = right_channel.clone().iter().sum::<f32>() / original_length as f32;
-    for (left, right) in izip!(left_channel.iter_mut(), right_channel.iter_mut()) {
+    let left_dc = left_channel.iter().sum::<f32>() / original_length as f32;
+    let right_dc = right_channel.iter().sum::<f32>() / original_length as f32;
+    izip!(left_channel.iter_mut(), right_channel.iter_mut()).for_each(|(left, right)| {
         *left -= left_dc;
         *right -= right_dc;
-    }
+    });
 
     // Best to do a small FFT to prevent transient smearing
     let fft_size = next_fast_fft(sample_rate);
@@ -312,107 +312,111 @@ fn process_samples(
     let mut not_left_fft = r2c.make_output_vec();
     let mut not_right_fft = r2c.make_output_vec();
 
-    for (left_chunk, right_chunk, not_left_chunk, not_right_chunk) in izip!(
+    izip!(
         left_channel_chunks,
         right_channel_chunks,
         not_left_channel_chunks,
         not_right_channel_chunks
-    ) {
-        let mut left = vec![];
-        let mut right = vec![];
-        let mut not_left = vec![];
-        let mut not_right = vec![];
-        left.reserve_exact(fft_size);
-        right.reserve_exact(fft_size);
-        not_left.reserve_exact(fft_size);
-        not_right.reserve_exact(fft_size);
-        left.push(0.0_f32);
-        right.push(0.0_f32);
-        not_left.push(0.0_f32);
-        not_right.push(0.0_f32);
-        left.extend(left_chunk);
-        right.extend(right_chunk);
-        not_left.extend(not_left_chunk);
-        not_right.extend(not_right_chunk);
-        left.resize(fft_size, 0.0_f32);
-        right.resize(fft_size, 0.0_f32);
-        not_left.resize(fft_size, 0.0_f32);
-        not_right.resize(fft_size, 0.0_f32);
+    )
+    .for_each(
+        |(left_chunk, right_chunk, not_left_chunk, not_right_chunk)| {
+            let mut left = vec![];
+            let mut right = vec![];
+            let mut not_left = vec![];
+            let mut not_right = vec![];
+            left.reserve_exact(fft_size);
+            right.reserve_exact(fft_size);
+            not_left.reserve_exact(fft_size);
+            not_right.reserve_exact(fft_size);
+            left.push(0.0_f32);
+            right.push(0.0_f32);
+            not_left.push(0.0_f32);
+            not_right.push(0.0_f32);
+            left.extend(left_chunk);
+            right.extend(right_chunk);
+            not_left.extend(not_left_chunk);
+            not_right.extend(not_right_chunk);
+            left.resize(fft_size, 0.0_f32);
+            right.resize(fft_size, 0.0_f32);
+            not_left.resize(fft_size, 0.0_f32);
+            not_right.resize(fft_size, 0.0_f32);
 
-        for index in 1..=sample_rate {
-            // SAFETY: index never exceeds sample_rate - 1
-            let window_multiplier = *unsafe { window.get_unchecked(index.strict_sub(1_usize)) };
-            // SAFETY: index never exceeds sample_rate - 1
-            *unsafe { left.get_unchecked_mut(index) } *= window_multiplier;
-            // SAFETY: index never exceeds sample_rate - 1
-            *unsafe { right.get_unchecked_mut(index) } *= window_multiplier;
-            // SAFETY: index never exceeds sample_rate - 1
-            *unsafe { not_left.get_unchecked_mut(index) } *= window_multiplier;
-            // SAFETY: index never exceeds sample_rate - 1
-            *unsafe { not_right.get_unchecked_mut(index) } *= window_multiplier;
-        }
+            for index in 1..=sample_rate {
+                // SAFETY: index never exceeds sample_rate - 1
+                let window_multiplier = *unsafe { window.get_unchecked(index.strict_sub(1_usize)) };
+                // SAFETY: index never exceeds sample_rate - 1
+                *unsafe { left.get_unchecked_mut(index) } *= window_multiplier;
+                // SAFETY: index never exceeds sample_rate - 1
+                *unsafe { right.get_unchecked_mut(index) } *= window_multiplier;
+                // SAFETY: index never exceeds sample_rate - 1
+                *unsafe { not_left.get_unchecked_mut(index) } *= window_multiplier;
+                // SAFETY: index never exceeds sample_rate - 1
+                *unsafe { not_right.get_unchecked_mut(index) } *= window_multiplier;
+            }
 
-        // Ignore errors by `RealFFT`
-        // `RustFFT` does not return a Result after processing,
-        //   but `RealFFT` does return Results due to some zero-check
-        //   `RealFFT` author says to just ignore these in the meantime.
-        // https://github.com/HEnquist/realfft/issues/41#issuecomment-2050347470
-        _ = r2c.process(&mut left, &mut left_fft);
-        _ = r2c.process(&mut right, &mut right_fft);
-        _ = r2c.process(&mut not_left, &mut not_left_fft);
-        _ = r2c.process(&mut not_right, &mut not_right_fft);
+            // Ignore errors by `RealFFT`
+            // `RustFFT` does not return a Result after processing,
+            //   but `RealFFT` does return Results due to some zero-check
+            //   `RealFFT` author says to just ignore these in the meantime.
+            // https://github.com/HEnquist/realfft/issues/41#issuecomment-2050347470
+            _ = r2c.process(&mut left, &mut left_fft);
+            _ = r2c.process(&mut right, &mut right_fft);
+            _ = r2c.process(&mut not_left, &mut not_left_fft);
+            _ = r2c.process(&mut not_right, &mut not_right_fft);
 
-        // The first bin is the DC bin, which is the average unheard noise
-        // Unfortunately, it's a bad idea to set the value to zero, since
-        //   it causes jumps/clicks/discontinuities between consecutive FFTs
-        for index in 1..fft_complex_size {
-            // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
-            let left_fft_index = unsafe { left_fft.get_unchecked_mut(index) };
-            // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
-            let right_fft_index = unsafe { right_fft.get_unchecked_mut(index) };
-            // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
-            let not_left_fft_index = unsafe { not_left_fft.get_unchecked_mut(index) };
-            // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
-            let not_right_fft_index = unsafe { not_right_fft.get_unchecked_mut(index) };
-            align(left_fft_index, right_fft_index);
-            align(not_left_fft_index, not_right_fft_index);
-        }
+            // The first bin is the DC bin, which is the average unheard noise
+            // Unfortunately, it's a bad idea to set the value to zero, since
+            //   it causes jumps/clicks/discontinuities between consecutive FFTs
+            for index in 1..fft_complex_size {
+                // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
+                let left_fft_index = unsafe { left_fft.get_unchecked_mut(index) };
+                // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
+                let right_fft_index = unsafe { right_fft.get_unchecked_mut(index) };
+                // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
+                let not_left_fft_index = unsafe { not_left_fft.get_unchecked_mut(index) };
+                // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
+                let not_right_fft_index = unsafe { not_right_fft.get_unchecked_mut(index) };
+                align(left_fft_index, right_fft_index);
+                align(not_left_fft_index, not_right_fft_index);
+            }
 
-        _ = c2r.process(&mut left_fft, &mut left);
-        _ = c2r.process(&mut right_fft, &mut right);
-        _ = c2r.process(&mut not_left_fft, &mut not_left);
-        _ = c2r.process(&mut not_right_fft, &mut not_right);
+            _ = c2r.process(&mut left_fft, &mut left);
+            _ = c2r.process(&mut right_fft, &mut right);
+            _ = c2r.process(&mut not_left_fft, &mut not_left);
+            _ = c2r.process(&mut not_right_fft, &mut not_right);
 
-        // Remove remaining FFT silence
-        left.truncate(sample_rate.strict_add(1));
-        right.truncate(sample_rate.strict_add(1));
-        not_left.truncate(sample_rate.strict_add(1));
-        not_right.truncate(sample_rate.strict_add(1));
+            // Remove remaining FFT silence
+            left.truncate(sample_rate.strict_add(1));
+            right.truncate(sample_rate.strict_add(1));
+            not_left.truncate(sample_rate.strict_add(1));
+            not_right.truncate(sample_rate.strict_add(1));
 
-        // Remove first sample, as it should be silence
-        // This should be faster than using a VecDeque since we're just removing one time
-        left.remove(0);
-        right.remove(0);
-        not_left.remove(0);
-        not_right.remove(0);
+            // Remove first sample, as it should be silence
+            // This should be faster than using a VecDeque since we're just removing one time
+            left.remove(0);
+            right.remove(0);
+            not_left.remove(0);
+            not_right.remove(0);
 
-        for (left_samp, right_samp, not_left_samp, not_right_samp) in izip!(
-            left.iter_mut(),
-            right.iter_mut(),
-            not_left.iter_mut(),
-            not_right.iter_mut()
-        ) {
-            *left_samp *= recip_fft;
-            *right_samp *= recip_fft;
-            *not_left_samp *= recip_fft;
-            *not_right_samp *= recip_fft;
-        }
+            izip!(
+                left.iter_mut(),
+                right.iter_mut(),
+                not_left.iter_mut(),
+                not_right.iter_mut()
+            )
+            .for_each(|(left_samp, right_samp, not_left_samp, not_right_samp)| {
+                *left_samp *= recip_fft;
+                *right_samp *= recip_fft;
+                *not_left_samp *= recip_fft;
+                *not_right_samp *= recip_fft;
+            });
 
-        processed_left.append(&mut left);
-        processed_right.append(&mut right);
-        processed_not_left.append(&mut not_left);
-        processed_not_right.append(&mut not_right);
-    }
+            processed_left.append(&mut left);
+            processed_right.append(&mut right);
+            processed_not_left.append(&mut not_left);
+            processed_not_right.append(&mut not_right);
+        },
+    );
 
     drop(left_fft);
     drop(right_fft);
@@ -443,12 +447,12 @@ fn process_samples(
     processed_right.shrink_to(original_length);
 
     // Remove DC after processing
-    let processed_left_dc = processed_left.clone().iter().sum::<f32>() / original_length as f32;
-    let processed_right_dc = processed_right.clone().iter().sum::<f32>() / original_length as f32;
-    for (left, right) in izip!(processed_left.iter_mut(), processed_right.iter_mut()) {
+    let processed_left_dc = processed_left.iter().sum::<f32>() / original_length as f32;
+    let processed_right_dc = processed_right.iter().sum::<f32>() / original_length as f32;
+    izip!(processed_left.iter_mut(), processed_right.iter_mut()).for_each(|(left, right)| {
         *left -= processed_left_dc;
         *right -= processed_right_dc;
-    }
+    });
 
     // Average out the loudness of the left and right channels
     // Need to .sqrt() the RMS to get the per-sample multiplier instead of the per-RMS multiplier
@@ -456,20 +460,20 @@ fn process_samples(
     let right_rms_sqrt = gated_rms(&processed_right, rate).sqrt();
     let left_equalizer = (right_rms_sqrt / left_rms_sqrt) as f32;
     let right_equalizer = (left_rms_sqrt / right_rms_sqrt) as f32;
-    for (left, right) in izip!(processed_left.iter_mut(), processed_right.iter_mut()) {
+    izip!(processed_left.iter_mut(), processed_right.iter_mut()).for_each(|(left, right)| {
         *left *= left_equalizer;
         *right *= right_equalizer;
-    }
+    });
 
     // Add DC noise to reduce peak levels
     let (left_min, left_max) = processed_left.iter().minmax().into_option().unwrap();
     let (right_min, right_max) = processed_right.iter().minmax().into_option().unwrap();
     let new_left_dc = (*left_min + *left_max) * 0.5_f32;
     let new_right_dc = (*right_min + *right_max) * 0.5_f32;
-    for (left, right) in izip!(processed_left.iter_mut(), processed_right.iter_mut()) {
+    izip!(processed_left.iter_mut(), processed_right.iter_mut()).for_each(|(left, right)| {
         *left -= new_left_dc;
         *right -= new_right_dc;
-    }
+    });
 
     // Overall processing is done
     // pack it up
@@ -490,18 +494,11 @@ fn save_audio(file_path: &Path, audio: &(Box<[f32]>, Box<[f32]>), rate: u32) {
         sample_format: hound::SampleFormat::Float,
     };
     let mut writer = hound::WavWriter::create(file_path, spec).expect("Could not create writer");
-    let length = audio.0.len();
 
-    for index in 0..length {
-        // SAFETY: index guaranteed to be within length
-        writer
-            .write_sample(*unsafe { audio.0.get_unchecked(index) })
-            .expect("Could not write sample");
-        // SAFETY: index guaranteed to be within length
-        writer
-            .write_sample(*unsafe { audio.1.get_unchecked(index) })
-            .expect("Could not write sample");
-    }
+    izip!(audio.0.iter(), audio.1.iter()).for_each(|(left, right)| {
+        writer.write_sample(*left).expect("Could not write sample");
+        writer.write_sample(*right).expect("Could not write sample");
+    });
     writer.finalize().expect("Could not finalize WAV file");
 }
 

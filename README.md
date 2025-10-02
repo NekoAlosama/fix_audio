@@ -47,6 +47,7 @@ __Things to do__:
 * Increase program efficiency
   * The current memory usage is good, so the main feature to implement is multithreading
   * Main bottlenecks also seem to be Sympohonia decoding (I/O reading) and hound .wav file-saving (I/O writing)
+    * Parallelism via `rayon` doesn't seem to improve times
   * Another improvement would be to set the program's priority class (Idle -> Above Normal) and I/O priority (Normal -> High)
     * Approximate 50% speedup (90s to 60s on test suite) using System Informer to apply priorities
 * Add more error-checking
