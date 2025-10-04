@@ -7,7 +7,7 @@ edition = "2024"
 ebur128 = "0.1.10"
 hound = "3.5.1"
 itertools = "0.14.0"
-lofty = "0.22.4"
+#lofty = "0.22.4" # not implemented yet
 realfft = { version = "3.5.0", features = ["avx", "neon", "sse"] }
 symphonia = { git = "https://github.com/pdeljanov/Symphonia.git", branch = "dev-0.6", features = ["opt-simd", "all"] }
 
@@ -24,11 +24,29 @@ inherits = "release"
 debug = true
 
 [lints.clippy]
+# might be better to change the lint groups to priority=-1
 complexity = "warn"
 correctness = "warn"
 nursery = "warn"
+
 pedantic = "warn"
+cast_precision_loss = {level = "allow", priority = 1} # reason = "allow u64 as f64, likey no precision loss"
+cast_possible_truncation = {level = "allow", priority =1} # reason = "allow using f64 for precision, then truncating to f32"
+
 perf = "warn"
 style = "warn"
+
 suspicious = "warn"
+blanket_clippy_restriction_lints = {level = "allow", priority = 1} # reason = "whitelist seens better than blacklist" 
+
 restriction = "warn"
+as_conversions = {level = "allow", priority = 1} #  reason = "some conversions are required, other cast_* lints are still used"
+cast_sign_loss = {level = "allow", priority = 1 } # reason ="only positive/unsigned values used" 
+float_arithmetic = {level = "allow", priority = 1 } # reason ="float arithmetic is required"
+implicit_return = {level = "allow", priority = 1 } # reason ="make things rusty"
+print_stdout = {level = "allow", priority = 1  } # reason = "printing to console is required"
+question_mark_used = {level = "allow", priority = 1 } # reason = "no need to add additional error info"
+semicolon_outside_block = {level = "allow", priority = 1 } #  reason = "personal preference"
+separated_literal_suffix = {level = "allow", priority = 1 } # reason = "personal preference"
+single_call_fn = {level = "allow", priority = 1 } # reason = "allow breaking long functions into smaller functions"
+use_debug = {level = "allow", priority = 1} #  reason = "pretty print is good enough"

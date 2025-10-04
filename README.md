@@ -13,7 +13,7 @@ Currently, this program takes in stereo audio files (input folder created on fir
     * Uses the EBU R 128 Integrated Loudness, while RX 11 uses plain RMS
     * Plain RMS is affected by DC bias
 * (Unimplemented: Removes DC bias / inaudible 0.0 hz noise)
-  * Current known implementation causes clicks/jumps/artifacts
+  * Current known implementation causes large clicks/jumps/artifacts
   * Concept based on iZotope RX 11's "Filter DC Offset" option in its "De-hum" module, automated with RX 11's "Batch Processor"
   * Use case: noise may cause audible noise/clicks/artifacts/imbalances with further processing
     * Loudness stats like RMS and peak level will be incorrect because of DC noise
@@ -25,17 +25,16 @@ Currently, this program takes in stereo audio files (input folder created on fir
 Processed audio files are sent to the output folder as 32-bit floating-point .wav files. Non-audio files (covers, documents, etc.) are transfered to the output folder. The original audio files are kept in the input folder, so remember to delete them if you don't need to re-run the program with changes.
 
 ## Reflection
-__Known problems I can't fix__:
+__Known problems I can't seem to fix__:
 * Symphonia dev-0.6 doesn't support certain features
   * Try converting music files to .wav
     * .opus files or video files containing audio in general
     * .mp3 file output is longer than it should
-* Alignment may introduce clicks
-  * Possible that original audio had the clicks, but were out-of-phase
+* Current alignment algorithm introduces clicks
+  * Unsure when and why the clicks occur
+  * Partially mitigated through window overlapping
 * FFT introduces relatively minor transient smearing / pre-echo
-  * Problem tracks:
-    * SOPHIE - "MSMSMSM": Transient hi-hat of <0.1s, right channel delayed by ~0.02s
-
+  * Mainly affects very short hi-hats and sounds delayed in one channel
 
 __Things to do__:
 * Copy tags from input to output
@@ -49,7 +48,7 @@ __Things to do__:
   * Main bottlenecks also seem to be Sympohonia decoding (I/O reading) and hound .wav file-saving (I/O writing)
     * Parallelism via `rayon` doesn't seem to improve times
   * Another improvement would be to set the program's priority class (Idle -> Above Normal) and I/O priority (Normal -> High)
-    * Approximate 50% speedup (90s to 60s on test suite) using System Informer to apply priorities
+    * Approximate 50% speedup (90s to 60s on an old test suite) using System Informer to apply priorities
 * Add more error-checking
   * e.g. Vec memory allocation on 32-bit targets for long files (12-hours of audio)
     * could just suggest cutting down the audio into smaller bits

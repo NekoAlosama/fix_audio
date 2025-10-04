@@ -1,38 +1,3 @@
-// Allow-list for non-restriction lints
-#![allow(
-    clippy::cast_precision_loss,
-    reason = "allow u64 as f64, likey no precision loss"
-)]
-#![allow(
-    clippy::cast_possible_truncation,
-    reason = "allow using f64 for precision, then truncating to f32"
-)]
-// Modifications to restriction lints
-#![allow(
-    clippy::as_conversions,
-    reason = "some conversions are required, other cast_* lints are still used"
-)]
-#![allow(
-    clippy::blanket_clippy_restriction_lints,
-    reason = "whitelist seens better than blacklist"
-)]
-#![allow(clippy::cast_sign_loss, reason = "only positive/unsigned values used")]
-#![allow(clippy::float_arithmetic, reason = "float arithmetic is required")]
-#![allow(clippy::implicit_return, reason = "make things rusty")]
-#![allow(clippy::print_stdout, reason = "printing to console is required")]
-#![allow(
-    clippy::question_mark_used,
-    reason = "no need to add additional error info"
-)]
-#![allow(clippy::semicolon_outside_block, reason = "personal preference")]
-#![allow(clippy::separated_literal_suffix, reason = "personal preference")]
-#![allow(
-    clippy::single_call_fn,
-    reason = "allow breaking long functions into smaller functions"
-)]
-// #![allow(clippy::unwrap_used)]
-#![allow(clippy::use_debug, reason = "pretty print is good enough")]
-
 // Imports
 use core::f64::consts::PI;
 use ebur128::{EbuR128, Mode};
@@ -146,12 +111,12 @@ fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Error> 
 /// We'll zero-pad the seconds anyway
 fn next_fast_fft(rate: usize) -> usize {
     match rate {
-        2205 => 2304,  // 44100
-        2400 => 2592,  // 48000
-        4410 => 4608,  // 88200
-        4800 => 5184,  // 96000
-        8820 => 9216,  // 176400
-        9600 => 10368, // 192000
+        4410 => 4608,   // 44_100
+        4800 => 5184,   // 48_000
+        8820 => 9216,   // 88_200
+        9600 => 10368,  // 96_000
+        17640 => 18432, // 176_400
+        19200 => 19683, // 192_000
         _ => unimplemented!(),
     }
 }
@@ -164,9 +129,9 @@ fn next_fast_fft(rate: usize) -> usize {
 /// Zero points are added to the beginning and end of the window at the FFT so some perodicity property is satisfied
 /// Here, no values should equal zero to prevent lost information
 fn window(rate: usize) -> Box<[f32]> {
-    (0..rate)
+    (0..=rate)
         .map(|n| {
-            (PI * n.strict_add(1_usize) as f64 / rate.strict_add(1_usize) as f64)
+            (PI * n as f64 / rate.strict_add(1_usize) as f64)
                 .sin()
                 .powi(2) as f32
         })
@@ -178,41 +143,24 @@ fn window(rate: usize) -> Box<[f32]> {
 ///   i.e. zero-crossings should match with mid channel
 /// Higher weight towards higher magnitude, so the channel with the higher magnitude doesn't rotate much,
 ///   while the smaller magnitude channel may rotate a lot
-fn align(left: &mut Complex<f32>, right: &mut Complex<f32>) {
-    // Circular mean / true midpoint
+fn align(original_left: &mut Complex<f32>, original_right: &mut Complex<f32>) {
+    // TODO: find better algorithm
+    // For some reason, this causes a noticable amount of clicks when processing songs
+    //   with loud bass. In the meantime, we could add error checking
     #[expect(
         clippy::arithmetic_side_effects,
-        reason = "clippy thinks this is an integer add, whereas f32 will saturate to the infinities"
+        reason = "clippy thinks this is an integer add"
     )]
-    let sum = *left + *right;
-
-    // Squares without .sqrt until later
-    let sum_sqr_inv = sum.norm_sqr().recip();
-    let left_sqr = left.norm_sqr();
-    let right_sqr = right.norm_sqr();
-
-    // Prevent propagation of NaN or infinity
-    // Used to be .is_normal(), but subnormal values aren't possible since
-    //   we call .recip() beforehand (i.e. 1.0/f32::MIN_POSITIVE, 1.0/f32::MAX, 1.0/f32::INFINITY == 0.0, 1.0/0.0, 1.0/f32::NAN)
-    if sum_sqr_inv.is_finite() {
-        // Equivalent to using cos-sin of atan2(sum)
-        *left = sum.scale((left_sqr * sum_sqr_inv).sqrt());
-        *right = sum.scale((right_sqr * sum_sqr_inv).sqrt());
+    let sum = *original_left + *original_right;
+    let sum_norm_recip = sum.norm().recip();
+    if sum_norm_recip.is_finite() {
+        *original_left = sum.scale(original_left.norm() * sum_norm_recip);
+        *original_right = sum.scale(original_right.norm() * sum_norm_recip);
     } else {
-        let sum_norm_inv = sum.norm().recip();
-        let left_norm = left_sqr.sqrt();
-        let right_norm = right_sqr.sqrt();
-        // Check if sum_sqr_inv is recoverable by taking the square root before .recip()
-        if sum_norm_inv.is_finite() {
-            *left = sum.scale(left_norm * sum_norm_inv);
-            *right = sum.scale(right_norm * sum_norm_inv);
-        } else {
-            // If we get here, the sum coordinate is near the origin of 0.0 + 0.0i, so
-            //   the left and right channels are either silence or are completely out-of-phase
-            // Since we want to keep the zero-crossings, we just have the right copy the left
-            // Implicitly, *left = *left
-            *right = *left;
-        }
+        // Just copying the left channel in case of conflicts
+        // Seems better than choosing the louder channel in order to preserve the phase between FFTs
+        // Implicitly, *original_left = *original_left
+        *original_right = *original_left;
     }
 }
 
@@ -220,8 +168,8 @@ fn align(left: &mut Complex<f32>, right: &mut Complex<f32>) {
 /// Basically a two-pass windowed RMS.
 ///   First pass is used to detect and ignore silence at -70dB
 ///   Second pass is used to detect and ignore quieter points at the first-pass RMS minus 10dB
-fn gated_rms(samples: &Vec<f32>, rate: u32) -> f64 {
-    let mut ebur128 = EbuR128::new(1_u32, rate, Mode::I).expect("Shouldn't happen");
+fn gated_rms(samples: &Vec<f32>, sample_rate: u32) -> f64 {
+    let mut ebur128 = EbuR128::new(1_u32, sample_rate, Mode::I).expect("Shouldn't happen");
     // Planar sucks since it requires an array of channel arrays, so for one channel, it needs an array around it
     // f64 samples are not needed
     _ = ebur128.add_frames_f32(&samples.to_owned());
@@ -230,215 +178,215 @@ fn gated_rms(samples: &Vec<f32>, rate: u32) -> f64 {
     10.0_f64.powf(loudness / 20.0_f64)
 }
 
-// TODO: break up into smaller functions
-/// All three processing steps into one function
-fn process_samples(
-    planner: &mut RealFftPlanner<f32>,
-    data: (Vec<f32>, Vec<f32>),
-    rate: u32,
-) -> (Box<[f32]>, Box<[f32]>) {
-    let mut left_channel = data.0;
-    let mut right_channel = data.1;
-    let original_length = left_channel.len();
-    // Force minimum reconstructed frequency to 20 hz
-    let sample_rate = (f64::from(rate) / 20.0_f64) as usize;
-
-    // Remove DC before processing
-    // DC might affect magnitude of 20 Hz and interpolated values close to it
-    let left_dc = left_channel.iter().sum::<f32>() / original_length as f32;
-    let right_dc = right_channel.iter().sum::<f32>() / original_length as f32;
-    izip!(left_channel.iter_mut(), right_channel.iter_mut()).for_each(|(left, right)| {
-        *left -= left_dc;
-        *right -= right_dc;
+/// Static DC removal
+fn remove_dc(channel_1: &mut [f32], channel_2: &mut [f32]) {
+    let length = channel_1.len() as f32;
+    let first_dc = channel_1.iter().sum::<f32>() / length;
+    let second_dc = channel_2.iter().sum::<f32>() / length;
+    izip!(channel_1.iter_mut(), channel_2.iter_mut()).for_each(|(first, second)| {
+        *first -= first_dc;
+        *second -= second_dc;
     });
+}
 
+/// Two-channel FFT processing
+fn fft_process(
+    planner: &mut RealFftPlanner<f32>,
+    mut left_channel: Vec<f32>,
+    mut right_channel: Vec<f32>,
+    rate: usize,
+) -> (Vec<f32>, Vec<f32>) {
     // Best to do a small FFT to prevent transient smearing
-    let fft_size = next_fast_fft(sample_rate);
+    let fft_size = next_fast_fft(rate);
     let recip_fft = (fft_size as f64).recip() as f32;
     let r2c = planner.plan_fft_forward(fft_size);
     let c2r = planner.plan_fft_inverse(fft_size);
-    let fft_complex_size = r2c.complex_len();
 
     // Pre-calculate window function
-    let window = window(sample_rate);
-
-    // For the original signal, silence is added to the end, while the
-    //   offset signal's silence is added to the beginning
-    // When using 20 hz, 44.1khz needs 1102.5 samples of silence, which becomes 1102
-    // The effect is insignificant anyways, giving a 0.0712% or 0.00619dB difference
-    // TODO: offset can technically fail original_length is near usize::MAX
-    //   would happen if usize == u32 and decoded a 12-hour 96khz file
-    let offset = sample_rate >> 1_usize;
-    let offset_vec = vec![0.0_f32; offset];
-    let mut not_left_channel = offset_vec.clone();
-    let mut not_right_channel = offset_vec;
-    not_left_channel.append(&mut left_channel.clone());
-    not_right_channel.append(&mut right_channel.clone());
+    let window = window(rate);
 
     // The algorithm I want to use will chunk each signal by sample_rate, so it's better to round up
     //   to the next multiple so we can use ChunksExact and have no remainder
-    let fft_total = not_left_channel.len().next_multiple_of(sample_rate);
+    let fft_total = left_channel.len().next_multiple_of(rate);
     left_channel.resize(fft_total, 0.0);
     right_channel.resize(fft_total, 0.0);
-    not_left_channel.resize(fft_total, 0.0);
-    not_right_channel.resize(fft_total, 0.0);
 
     // Turning the Vec's into Box'es will shrink them and prevent further allocations and mutations
     let left_channel_box = left_channel.into_boxed_slice();
     let right_channel_box = right_channel.into_boxed_slice();
-    let not_left_channel_box = not_left_channel.into_boxed_slice();
-    let not_right_channel_box = not_right_channel.into_boxed_slice();
     // Chunking for later
-    let left_channel_chunks = left_channel_box.chunks_exact(sample_rate);
-    let right_channel_chunks = right_channel_box.chunks_exact(sample_rate);
-    let not_left_channel_chunks = not_left_channel_box.chunks_exact(sample_rate);
-    let not_right_channel_chunks = not_right_channel_box.chunks_exact(sample_rate);
+    let left_channel_chunks = left_channel_box.chunks_exact(rate);
+    let right_channel_chunks = right_channel_box.chunks_exact(rate);
 
     // Saving samples for later
     // .reserve_exact() reduces memory by preventing over-allocation
     let mut processed_left: Vec<f32> = vec![];
     let mut processed_right: Vec<f32> = vec![];
-    let mut processed_not_left: Vec<f32> = vec![];
-    let mut processed_not_right: Vec<f32> = vec![];
     processed_left.reserve_exact(fft_total);
     processed_right.reserve_exact(fft_total);
-    processed_not_left.reserve_exact(fft_total);
-    processed_not_right.reserve_exact(fft_total);
 
     // Create scratch FFT for `RealFFT`
     // `RealFFT` uses `RustFFT`'s .process_with_scratch() for its .process() function
     let mut left_fft = r2c.make_output_vec();
     let mut right_fft = r2c.make_output_vec();
-    let mut not_left_fft = r2c.make_output_vec();
-    let mut not_right_fft = r2c.make_output_vec();
 
-    izip!(
-        left_channel_chunks,
-        right_channel_chunks,
-        not_left_channel_chunks,
-        not_right_channel_chunks
-    )
-    .for_each(
-        |(left_chunk, right_chunk, not_left_chunk, not_right_chunk)| {
-            let mut left = vec![];
-            let mut right = vec![];
-            let mut not_left = vec![];
-            let mut not_right = vec![];
-            left.reserve_exact(fft_size);
-            right.reserve_exact(fft_size);
-            not_left.reserve_exact(fft_size);
-            not_right.reserve_exact(fft_size);
-            left.push(0.0_f32);
-            right.push(0.0_f32);
-            not_left.push(0.0_f32);
-            not_right.push(0.0_f32);
-            left.extend(left_chunk);
-            right.extend(right_chunk);
-            not_left.extend(not_left_chunk);
-            not_right.extend(not_right_chunk);
-            left.resize(fft_size, 0.0_f32);
-            right.resize(fft_size, 0.0_f32);
-            not_left.resize(fft_size, 0.0_f32);
-            not_right.resize(fft_size, 0.0_f32);
+    // Scratch vec for chunks
+    let mut left = vec![];
+    let mut right = vec![];
+    left.reserve_exact(fft_size);
+    right.reserve_exact(fft_size);
 
-            for index in 1..=sample_rate {
-                // SAFETY: index never exceeds sample_rate - 1
-                let window_multiplier = *unsafe { window.get_unchecked(index.strict_sub(1_usize)) };
-                // SAFETY: index never exceeds sample_rate - 1
-                *unsafe { left.get_unchecked_mut(index) } *= window_multiplier;
-                // SAFETY: index never exceeds sample_rate - 1
-                *unsafe { right.get_unchecked_mut(index) } *= window_multiplier;
-                // SAFETY: index never exceeds sample_rate - 1
-                *unsafe { not_left.get_unchecked_mut(index) } *= window_multiplier;
-                // SAFETY: index never exceeds sample_rate - 1
-                *unsafe { not_right.get_unchecked_mut(index) } *= window_multiplier;
-            }
+    izip!(left_channel_chunks, right_channel_chunks,).for_each(|(left_chunk, right_chunk)| {
+        left.push(0.0_f32);
+        right.push(0.0_f32);
+        left.extend(left_chunk);
+        right.extend(right_chunk);
 
-            // Ignore errors by `RealFFT`
-            // `RustFFT` does not return a Result after processing,
-            //   but `RealFFT` does return Results due to some zero-check
-            //   `RealFFT` author says to just ignore these in the meantime.
-            // https://github.com/HEnquist/realfft/issues/41#issuecomment-2050347470
-            _ = r2c.process(&mut left, &mut left_fft);
-            _ = r2c.process(&mut right, &mut right_fft);
-            _ = r2c.process(&mut not_left, &mut not_left_fft);
-            _ = r2c.process(&mut not_right, &mut not_right_fft);
-
-            // The first bin is the DC bin, which is the average unheard noise
-            // Unfortunately, it's a bad idea to set the value to zero, since
-            //   it causes jumps/clicks/discontinuities between consecutive FFTs
-            for index in 1..fft_complex_size {
-                // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
-                let left_fft_index = unsafe { left_fft.get_unchecked_mut(index) };
-                // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
-                let right_fft_index = unsafe { right_fft.get_unchecked_mut(index) };
-                // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
-                let not_left_fft_index = unsafe { not_left_fft.get_unchecked_mut(index) };
-                // SAFETY: index guaranteed to be less than fft length, which is fft_complex_size
-                let not_right_fft_index = unsafe { not_right_fft.get_unchecked_mut(index) };
-                align(left_fft_index, right_fft_index);
-                align(not_left_fft_index, not_right_fft_index);
-            }
-
-            _ = c2r.process(&mut left_fft, &mut left);
-            _ = c2r.process(&mut right_fft, &mut right);
-            _ = c2r.process(&mut not_left_fft, &mut not_left);
-            _ = c2r.process(&mut not_right_fft, &mut not_right);
-
-            // Remove remaining FFT silence
-            left.truncate(sample_rate.strict_add(1));
-            right.truncate(sample_rate.strict_add(1));
-            not_left.truncate(sample_rate.strict_add(1));
-            not_right.truncate(sample_rate.strict_add(1));
-
-            // Remove first sample, as it should be silence
-            // This should be faster than using a VecDeque since we're just removing one time
-            left.remove(0);
-            right.remove(0);
-            not_left.remove(0);
-            not_right.remove(0);
-
-            izip!(
-                left.iter_mut(),
-                right.iter_mut(),
-                not_left.iter_mut(),
-                not_right.iter_mut()
-            )
-            .for_each(|(left_samp, right_samp, not_left_samp, not_right_samp)| {
-                *left_samp *= recip_fft;
-                *right_samp *= recip_fft;
-                *not_left_samp *= recip_fft;
-                *not_right_samp *= recip_fft;
+        // length is now sample_rate + 1
+        // Skip the first element, which should be zero for all of these iterators
+        izip!(left.iter_mut(), right.iter_mut(), window.iter())
+            .skip(1)
+            .for_each(|(left_point, right_point, window_multiplier)| {
+                *left_point *= window_multiplier;
+                *right_point *= window_multiplier;
             });
 
-            processed_left.append(&mut left);
-            processed_right.append(&mut right);
-            processed_not_left.append(&mut not_left);
-            processed_not_right.append(&mut not_right);
-        },
+        left.resize(fft_size, 0.0_f32);
+        right.resize(fft_size, 0.0_f32);
+
+        // Ignore errors by `RealFFT`
+        // `RustFFT` does not return a Result after processing,
+        //   but `RealFFT` does return Results due to some zero-check
+        //   `RealFFT` author says to just ignore these in the meantime.
+        // https://github.com/HEnquist/realfft/issues/41#issuecomment-2050347470
+        _ = r2c.process(&mut left, &mut left_fft);
+        _ = r2c.process(&mut right, &mut right_fft);
+
+        // The first bin is the DC bin, which is the average unheard noise
+        // It's better to handle DC in the time domain, not the frequency domain,
+        //   so we skip it
+        izip!(left_fft.iter_mut(), right_fft.iter_mut(),)
+            .skip(1)
+            .for_each(|(left_fft_point, right_fft_point)| {
+                align(left_fft_point, right_fft_point);
+            });
+
+        _ = c2r.process(&mut left_fft, &mut left);
+        _ = c2r.process(&mut right_fft, &mut right);
+
+        // Remove remaining FFT silence
+        left.truncate(rate.strict_add(1));
+        right.truncate(rate.strict_add(1));
+
+        // Remove first sample, as it should be silence
+        // This should be faster than using a VecDeque since we're just removing one time
+        left.remove(0);
+        right.remove(0);
+
+        izip!(left.iter_mut(), right.iter_mut(),).for_each(|(left_samp, right_samp)| {
+            *left_samp *= recip_fft;
+            *right_samp *= recip_fft;
+        });
+
+        // Scratch Vec's are cleared by these lines
+        processed_left.append(&mut left);
+        processed_right.append(&mut right);
+    });
+
+    (processed_left, processed_right)
+}
+
+/// Specific overlapping
+fn overlap(
+    planner: &mut RealFftPlanner<f32>,
+    rate: usize,
+    left_channel: &[f32],
+    right_channel: &[f32],
+    holding_left_channel: &mut [f32],
+    holding_right_channel: &mut [f32],
+    offset: usize,
+) {
+    let mut offset_left = vec![0.0_f32; offset];
+    let mut offset_right = vec![0.0_f32; offset];
+    offset_left.extend(left_channel.iter());
+    offset_right.extend(right_channel.iter());
+    let (processed_left, processed_right) = fft_process(planner, offset_left, offset_right, rate);
+    izip!(
+        holding_left_channel.iter_mut(),
+        holding_right_channel.iter_mut(),
+        processed_left.iter().skip(offset),
+        processed_right.iter().skip(offset),
+    )
+    .for_each(|(held_left, held_right, left, right)| {
+        *held_left += left;
+        *held_right += right;
+    });
+}
+
+/// All three processing steps into one function
+fn process_samples(data: (Vec<f32>, Vec<f32>), sample_rate: u32) -> (Box<[f32]>, Box<[f32]>) {
+    let mut left_channel = data.0;
+    let mut right_channel = data.1;
+    let original_length = left_channel.len();
+    // Force minimum reconstructed frequency to N hertz
+    let f64_rate = f64::from(sample_rate) / 10.0_f64; // Testing with 10 Hz
+    let rate = f64_rate as usize;
+
+    // Remove DC before processing
+    // DC might affect magnitude of N Hz and interpolated values close to it
+    remove_dc(&mut left_channel, &mut right_channel);
+
+    let mut real_planner = RealFftPlanner::<f32>::new();
+    let (mut processed_left, mut processed_right) = fft_process(
+        &mut real_planner,
+        left_channel.clone(),
+        right_channel.clone(),
+        rate,
     );
 
-    drop(left_fft);
-    drop(right_fft);
-    drop(not_left_fft);
-    drop(not_right_fft);
-    drop(r2c);
-    drop(c2r);
+    // Make other FFTs to overlap with the original
+    // For some reason, even denominators should be used, as
+    //   odd denominators (e.g. 3) cause a vibrato effect
+    // Also for some reason reduces peak levels???
+    // TODO: offset can technically fail original_length is near usize::MAX
+    //   would happen if usize == u32 and decoded a 12-hour 96khz file
+    overlap(
+        &mut real_planner,
+        rate,
+        &left_channel,
+        &right_channel,
+        &mut processed_left,
+        &mut processed_right,
+        (f64_rate * 0.5).round_ties_even() as usize,
+    );
+    overlap(
+        &mut real_planner,
+        rate,
+        &left_channel,
+        &right_channel,
+        &mut processed_left,
+        &mut processed_right,
+        (f64_rate * 0.25).round_ties_even() as usize,
+    );
+    overlap(
+        &mut real_planner,
+        rate,
+        &left_channel,
+        &right_channel,
+        &mut processed_left,
+        &mut processed_right,
+        (f64_rate * 0.75).round_ties_even() as usize,
+    );
 
-    // Add the original and offset signals together to get the unwindowed level
-    for index in 0..original_length {
-        // TODO: add checking for usize length audio
-        // SAFETY: index + offset < fft_total
-        let not_index = unsafe { index.unchecked_add(offset) };
-        // SAFETY: index + offset < fft_total
-        *unsafe { processed_left.get_unchecked_mut(index) } +=
-            *unsafe { processed_not_left.get_unchecked(not_index) };
-        // SAFETY: index + offset < fft_total
-        *unsafe { processed_right.get_unchecked_mut(index) } +=
-            *unsafe { processed_not_right.get_unchecked(not_index) };
-    }
-    drop(processed_not_left);
-    drop(processed_not_right);
+    drop(left_channel);
+    drop(right_channel);
+    // Divide by 2 because of two full overlaps being used
+    //   first full: original (i.e. 0%) + 50%
+    //   second full: 25% + 75%
+    izip!(processed_left.iter_mut(), processed_right.iter_mut()).for_each(|(left, right)| {
+        *left *= 0.5;
+        *right *= 0.5;
+    });
 
     // Remove chunking zero-padding
     processed_left.truncate(original_length);
@@ -447,33 +395,32 @@ fn process_samples(
     processed_right.shrink_to(original_length);
 
     // Remove DC after processing
-    let processed_left_dc = processed_left.iter().sum::<f32>() / original_length as f32;
-    let processed_right_dc = processed_right.iter().sum::<f32>() / original_length as f32;
-    izip!(processed_left.iter_mut(), processed_right.iter_mut()).for_each(|(left, right)| {
-        *left -= processed_left_dc;
-        *right -= processed_right_dc;
-    });
+    remove_dc(&mut processed_left, &mut processed_right);
 
     // Average out the loudness of the left and right channels
     // Need to .sqrt() the RMS to get the per-sample multiplier instead of the per-RMS multiplier
-    let left_rms_sqrt = gated_rms(&processed_left, rate).sqrt();
-    let right_rms_sqrt = gated_rms(&processed_right, rate).sqrt();
+    let left_rms_sqrt = gated_rms(&processed_left, sample_rate).sqrt();
+    let right_rms_sqrt = gated_rms(&processed_right, sample_rate).sqrt();
     let left_equalizer = (right_rms_sqrt / left_rms_sqrt) as f32;
     let right_equalizer = (left_rms_sqrt / right_rms_sqrt) as f32;
-    izip!(processed_left.iter_mut(), processed_right.iter_mut()).for_each(|(left, right)| {
-        *left *= left_equalizer;
-        *right *= right_equalizer;
-    });
+    izip!(processed_left.iter_mut(), processed_right.iter_mut()).for_each(
+        |(left_samp, right_samp)| {
+            *left_samp *= left_equalizer;
+            *right_samp *= right_equalizer;
+        },
+    );
 
     // Add DC noise to reduce peak levels
     let (left_min, left_max) = processed_left.iter().minmax().into_option().unwrap();
     let (right_min, right_max) = processed_right.iter().minmax().into_option().unwrap();
     let new_left_dc = (*left_min + *left_max) * 0.5_f32;
     let new_right_dc = (*right_min + *right_max) * 0.5_f32;
-    izip!(processed_left.iter_mut(), processed_right.iter_mut()).for_each(|(left, right)| {
-        *left -= new_left_dc;
-        *right -= new_right_dc;
-    });
+    izip!(processed_left.iter_mut(), processed_right.iter_mut()).for_each(
+        |(left_samp, right_samp)| {
+            *left_samp -= new_left_dc;
+            *right_samp -= new_right_dc;
+        },
+    );
 
     // Overall processing is done
     // pack it up
@@ -484,12 +431,12 @@ fn process_samples(
 }
 
 /// Save processed audio to the output using `hound`
-fn save_audio(file_path: &Path, audio: &(Box<[f32]>, Box<[f32]>), rate: u32) {
+fn save_audio(file_path: &Path, audio: &(Box<[f32]>, Box<[f32]>), sample_rate: u32) {
     // TODO: add simple functionality for mono signals?
     // Might be a lot of work for something you can re-render to stereo in foobar2000
     let spec = hound::WavSpec {
         channels: 2,
-        sample_rate: rate,
+        sample_rate,
         bits_per_sample: 32, // hound only supports 32-bit float
         sample_format: hound::SampleFormat::Float,
     };
@@ -544,8 +491,6 @@ fn main() -> Result<(), Error> {
     // Get list of files in INPUT_DIR
     let entries: Vec<path::PathBuf> = get_paths(INPUT_DIR.into())?;
 
-    let mut real_planner = RealFftPlanner::<f32>::new();
-
     println!("Setup and file-exploring time: {:#?}", time.elapsed());
     for entry in entries {
         println!("Found file: {}", entry.display());
@@ -584,7 +529,7 @@ fn main() -> Result<(), Error> {
 
         print!("    Processing... ");
         io::stdout().flush()?;
-        let modified_audio = process_samples(&mut real_planner, channels, sample_rate);
+        let modified_audio = process_samples(channels, sample_rate);
 
         print!("    Saving...");
         io::stdout().flush()?;
