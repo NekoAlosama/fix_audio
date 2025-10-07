@@ -30,9 +30,10 @@ __Known problems I can't seem to fix__:
   * Try converting music files to .wav
     * .opus files or video files containing audio in general
     * .mp3 file output is longer than it should
-* Current alignment algorithm introduces clicks
-  * Unsure when and why the clicks occur
-  * Partially mitigated through window overlapping
+* FFT alignment algorithm introduces clicks in certian audio
+  * Likely cause is with the use of a short-time Fourier transform (STFT)
+  * Phase changes are not preserved between chunks, so large differences in phase could cause jumps?
+    * Just average the phase of each consecutive FFT?
 * FFT introduces relatively minor transient smearing / pre-echo
   * Mainly affects very short hi-hats and sounds delayed in one channel
 
