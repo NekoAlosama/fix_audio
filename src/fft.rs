@@ -1,4 +1,4 @@
-use core::f64::consts::PI;
+use core::f64::consts::TAU;
 use itertools::izip;
 use realfft::{RealFftPlanner, num_complex::Complex};
 
@@ -8,29 +8,32 @@ use realfft::{RealFftPlanner, num_complex::Complex};
 /// We'll zero-pad the seconds anyway
 const fn next_fast_fft(rate: usize) -> usize {
     match rate {
-        4410 => 4608,            // 44_100
-        4800 => 5184,            // 48_000
-        8820 => 9216,            // 88_200
-        9600 => 10368,           // 96_000
-        17640 => 18432,          // 176_400
-        19200 => 19683,          // 192_000
-        _ => rate.strict_add(2), // no padding except for the ends
+        4410 => 4608,   // 44_100
+        4800 => 5184,   // 48_000
+        8820 => 9216,   // 88_200
+        9600 => 10368,  // 96_000
+        17640 => 18432, // 176_400
+        19200 => 19683, // 192_000
+        _ => rate.strict_add(2).next_power_of_two(),
     }
 }
 
 /// Windowing is used to make the signal chunk fade in and out
 ///   to prevent discontinuities, which causes spectral leakage (noise tuned to the music).
-/// This function uses the Hann window, which is considered to be a jack-of-all-trades.
-/// One useful property is that 50% overlapping (i.e. window(n) + window(n + rate/2)) == 1.0, so
-///   we get back to the original level of the input if we overlap two FFTs with this offset between them.
-/// Zero points are added to the beginning and end of the window at the FFT so some perodicity property is satisfied
-/// Here, no values should equal zero to prevent lost information
 fn window(rate: usize) -> Box<[f32]> {
+    let new_rate = rate.strict_add(1) as f64;
+    // The actual level of the window doesn't really matter
+    // Window selection: minimize side-lobe level, ignore bandwidth of main lobe?
     (0..=rate)
         .map(|n| {
-            (PI * n as f64 / rate.strict_add(1_usize) as f64)
-                .sin()
-                .powi(2) as f32
+            (
+                // Matlab flat top window
+                // Needs 5 FFTs
+                0.21557895 - 0.41663158 * f64::cos(TAU * n as f64 / new_rate)
+                    + 0.277263158 * f64::cos(2.0_f64 * TAU * n as f64 / new_rate)
+                    - 0.083578947 * f64::cos(3.0_f64 * TAU * n as f64 / new_rate)
+                    + 0.006947368 * f64::cos(4.0_f64 * TAU * n as f64 / new_rate)
+            ) as f32
         })
         .collect()
 }

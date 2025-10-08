@@ -32,7 +32,9 @@ fn remove_dc(channel_1: &mut [f32], channel_2: &mut [f32]) {
 pub fn process_samples(data: (Vec<f32>, Vec<f32>), sample_rate: u32) -> (Vec<f32>, Vec<f32>) {
     let mut left_channel = data.0;
     let mut right_channel = data.1;
-    let original_length = left_channel.len();
+    let left_rms = gated_rms(&left_channel, sample_rate);
+    let right_rms = gated_rms(&right_channel, sample_rate);
+    let mean_rms = f64::sqrt(left_rms * right_rms);
     // Force minimum reconstructed frequency to N hertz
     let f64_rate = f64::from(sample_rate) / 20.0_f64; // Testing with 20 Hz
     let rate = f64_rate.round_ties_even() as usize;
@@ -49,51 +51,23 @@ pub fn process_samples(data: (Vec<f32>, Vec<f32>), sample_rate: u32) -> (Vec<f32
         rate,
     );
 
-    // Make other FFTs to overlap with the original
-    // Overlaps have to have a 50% difference, not necessarily sum to 100%
-    // Also for some reason reduces peak levels???
+    // Overlap other FFTs with different windows
     // TODO: offset can technically fail original_length is near isize::MAX
-    overlap(
-        &mut real_planner,
-        rate,
-        &left_channel,
-        &right_channel,
-        &mut processed_left,
-        &mut processed_right,
-        (f64_rate * 0.5).round_ties_even() as usize,
-    );
-    overlap(
-        &mut real_planner,
-        rate,
-        &left_channel,
-        &right_channel,
-        &mut processed_left,
-        &mut processed_right,
-        (f64_rate * 0.25).round_ties_even() as usize,
-    );
-    overlap(
-        &mut real_planner,
-        rate,
-        &left_channel,
-        &right_channel,
-        &mut processed_left,
-        &mut processed_right,
-        (f64_rate * 0.75).round_ties_even() as usize,
-    );
+    let total_ffts = 5;
+    (1..total_ffts).for_each(|n| {
+        overlap(
+            &mut real_planner,
+            rate,
+            &left_channel,
+            &right_channel,
+            &mut processed_left,
+            &mut processed_right,
+            (f64_rate * f64::from(n) / f64::from(total_ffts)).round_ties_even() as usize,
+        )
+    });
     drop(left_channel);
     drop(right_channel);
 
-    // Divide by 2 because of two full overlaps being used
-    //   first full: original (i.e. 0%) + 50%
-    //   second full: 25% + 75%
-    izip!(processed_left.iter_mut(), processed_right.iter_mut()).for_each(|(left, right)| {
-        *left *= 0.5;
-        *right *= 0.5;
-    });
-
-    // Remove chunking zero-padding
-    processed_left.truncate(original_length);
-    processed_right.truncate(original_length);
     processed_left.shrink_to_fit();
     processed_right.shrink_to_fit();
 
@@ -102,22 +76,20 @@ pub fn process_samples(data: (Vec<f32>, Vec<f32>), sample_rate: u32) -> (Vec<f32
 
     // Average out the loudness of the left and right channels
     // Need to .sqrt() the RMS to get the per-sample multiplier instead of the per-RMS multiplier
-    let left_rms_sqrt = gated_rms(&processed_left, sample_rate).sqrt();
-    let right_rms_sqrt = gated_rms(&processed_right, sample_rate).sqrt();
-    let left_equalizer = (right_rms_sqrt / left_rms_sqrt) as f32;
-    let right_equalizer = (left_rms_sqrt / right_rms_sqrt) as f32;
+    let processed_left_rms = gated_rms(&processed_left, sample_rate);
+    let processed_right_rms = gated_rms(&processed_right, sample_rate);
     izip!(processed_left.iter_mut(), processed_right.iter_mut()).for_each(
         |(left_samp, right_samp)| {
-            *left_samp *= left_equalizer;
-            *right_samp *= right_equalizer;
+            *left_samp *= (mean_rms / processed_left_rms) as f32;
+            *right_samp *= (mean_rms / processed_right_rms) as f32;
         },
     );
 
     // Add DC noise to reduce peak levels
     let (left_min, left_max) = processed_left.iter().minmax().into_option().unwrap();
     let (right_min, right_max) = processed_right.iter().minmax().into_option().unwrap();
-    let new_left_dc = (*left_min + *left_max) * 0.5_f32;
-    let new_right_dc = (*right_min + *right_max) * 0.5_f32;
+    let new_left_dc = f32::midpoint(*left_min, *left_max);
+    let new_right_dc = f32::midpoint(*right_min, *right_max);
     izip!(processed_left.iter_mut(), processed_right.iter_mut()).for_each(
         |(left_samp, right_samp)| {
             *left_samp -= new_left_dc;
