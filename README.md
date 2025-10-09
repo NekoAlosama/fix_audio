@@ -31,14 +31,11 @@ __Known problems I can't seem to fix__:
     * .opus files or video files containing audio in general
     * .mp3 file output is longer than it should
 * FFT alignment algorithm introduces clicks in certian audio
-  * Likely cause is with the use of a short-time Fourier transform (STFT)
-    * Experiments with lots of overlapped DTFTs don't have clicks, but have noticable spectral noise that can't be removed without lots of processing
-      * Might be mitigated through better windows, but I don't know how to implement those (Dolph-Chebyshev, DPSS/Kaiser)
-  * Phase changes are not preserved between chunks, so large differences in phase could cause jumps?
-    * Average the phase of each consecutive FFT?
-  * Also seems to be affected by windowing and overlap-adding
-    * Seems that Hann and Blackman windows aren't good enough?
   * Example album with introduced clicks: SOPHIE - "PRODUCT" (2025 Reissue)
+  * Likely caused by short-time Fourier transform (STFT)
+    * Clicks loudness affected by window choice and overlapping
+  * Likely caused by alignment algorithm
+    * Phase angle may not be preserved between FFTs
 * FFT introduces relatively minor transient smearing / pre-echo
   * Mainly affects very short hi-hats and sounds delayed in one channel
 

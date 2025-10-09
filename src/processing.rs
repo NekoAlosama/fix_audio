@@ -53,8 +53,8 @@ pub fn process_samples(data: (Vec<f32>, Vec<f32>), sample_rate: u32) -> (Vec<f32
 
     // Overlap other FFTs with different windows
     // TODO: offset can technically fail original_length is near isize::MAX
-    let total_ffts = 5;
-    (1..total_ffts).for_each(|n| {
+    let total_ffts = 6_i32; // one fft per term (cosine and constant) in window
+    (1_i32..total_ffts).for_each(|n| {
         overlap(
             &mut real_planner,
             rate,
@@ -63,7 +63,7 @@ pub fn process_samples(data: (Vec<f32>, Vec<f32>), sample_rate: u32) -> (Vec<f32
             &mut processed_left,
             &mut processed_right,
             (f64_rate * f64::from(n) / f64::from(total_ffts)).round_ties_even() as usize,
-        )
+        );
     });
     drop(left_channel);
     drop(right_channel);

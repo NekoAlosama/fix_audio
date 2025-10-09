@@ -27,12 +27,30 @@ fn window(rate: usize) -> Box<[f32]> {
     (0..=rate)
         .map(|n| {
             (
-                // Matlab flat top window
-                // Needs 5 FFTs
-                0.21557895 - 0.41663158 * f64::cos(TAU * n as f64 / new_rate)
-                    + 0.277263158 * f64::cos(2.0_f64 * TAU * n as f64 / new_rate)
-                    - 0.083578947 * f64::cos(3.0_f64 * TAU * n as f64 / new_rate)
-                    + 0.006947368 * f64::cos(4.0_f64 * TAU * n as f64 / new_rate)
+                // 6-term (cosine and constant) HFT116D window, flat top window with -18dB sidelobe falloff and -116.8dB leakage
+                // In backwards order due to mul_add
+                // https://holometer.fnal.gov/GH_FFT.pdf 
+                f64::mul_add(
+                    -0.006_628_8_f64,
+                    f64::cos(5.0_f64 * TAU * n as f64 / new_rate),
+                    f64::mul_add(
+                        0.122_838_9_f64,
+                        f64::cos(4.0_f64 * TAU * n as f64 / new_rate),
+                        f64::mul_add(
+                            -0.636_743_1_f64,
+                            f64::cos(3.0_f64 * TAU * n as f64 / new_rate),
+                            f64::mul_add(
+                                1.478_070_5_f64,
+                                f64::cos(2.0_f64 * TAU * n as f64 / new_rate),
+                                f64::mul_add(
+                                    -1.957_537_5_f64,
+                                    f64::cos(TAU * n as f64 / new_rate),
+                                    1.0_f64,
+                                ),
+                            ),
+                        ),
+                    ),
+                )
             ) as f32
         })
         .collect()
