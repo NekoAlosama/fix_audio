@@ -1,7 +1,6 @@
-use crate::fft::{fft_process, overlap};
+use crate::fft;
 use ebur128::{EbuR128, Mode};
 use itertools::{Itertools as _, izip};
-use realfft::RealFftPlanner;
 
 /// EBU R 128 Integrated Loudness calculation
 /// Basically a two-pass windowed RMS.
@@ -35,41 +34,18 @@ pub fn process_samples(data: (Vec<f32>, Vec<f32>), sample_rate: u32) -> (Vec<f32
     let left_rms = gated_rms(&left_channel, sample_rate);
     let right_rms = gated_rms(&right_channel, sample_rate);
     let mean_rms = f64::sqrt(left_rms * right_rms);
-    // Force minimum reconstructed frequency to N hertz
-    let f64_rate = f64::from(sample_rate) / 20.0_f64; // Testing with 20 Hz
-    let rate = f64_rate.round_ties_even() as usize;
 
     // Remove DC before processing
     // DC might affect magnitude of N Hz and interpolated values close to it
     remove_dc(&mut left_channel, &mut right_channel);
 
-    let mut real_planner = RealFftPlanner::<f32>::new();
-    let (mut processed_left, mut processed_right) = fft_process(
-        &mut real_planner,
-        left_channel.clone(),
-        right_channel.clone(),
-        rate,
-    );
-
-    // Overlap other FFTs with different windows
-    // TODO: offset can technically fail original_length is near isize::MAX
-    let total_ffts = 6_i32; // one fft per term (cosine and constant) in window
-    (1_i32..total_ffts).for_each(|n| {
-        overlap(
-            &mut real_planner,
-            rate,
-            &left_channel,
-            &right_channel,
-            &mut processed_left,
-            &mut processed_right,
-            (f64_rate * f64::from(n) / f64::from(total_ffts)).round_ties_even() as usize,
-        );
-    });
+    // Force minimum reconstructed frequency to N hertz
+    // 16hz is used since it's short enough to prevent smearing
+    let time_frame = f64::from(sample_rate) / 16.0_f64;
+    let (mut processed_left, mut processed_right) =
+        fft::overlapping_fft(time_frame, &left_channel, &right_channel);
     drop(left_channel);
     drop(right_channel);
-
-    processed_left.shrink_to_fit();
-    processed_right.shrink_to_fit();
 
     // Remove DC after processing
     remove_dc(&mut processed_left, &mut processed_right);

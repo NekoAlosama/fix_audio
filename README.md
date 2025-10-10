@@ -12,14 +12,8 @@ Currently, this program takes in stereo audio files (input folder created on fir
   * Use case: ensure that one channel doesn't overpower the other over the course of a track
     * Uses the EBU R 128 Integrated Loudness, while RX 11 uses plain RMS
     * Plain RMS is affected by DC bias
-* (Unimplemented: Removes DC bias / inaudible 0.0 hz noise)
-  * Current known implementation causes large clicks/jumps/artifacts
-  * Concept based on iZotope RX 11's "Filter DC Offset" option in its "De-hum" module, automated with RX 11's "Batch Processor"
-  * Use case: noise may cause audible noise/clicks/artifacts/imbalances with further processing
-    * Loudness stats like RMS and peak level will be incorrect because of DC noise
-    * Generally caused by amateur recording, mixing, and mastering (i.e. YAYAYI - track 13 from self-titled)
 * Add DC noise to reduce peak levels
-  * Currently being used to test where and when DC noise is noticable
+  * Currently being used to test where and when DC noise is noticable. If so, this will be replaced with a DC removal step
   * Use case: Reduce peak levels while keeping the same loudness
 
 Processed audio files are sent to the output folder as 32-bit floating-point .wav files. Non-audio files (covers, documents, etc.) are transfered to the output folder. The original audio files are kept in the input folder, so remember to delete them if you don't need to re-run the program with changes.
@@ -30,12 +24,15 @@ __Known problems I can't seem to fix__:
   * Try converting music files to .wav
     * .opus files or video files containing audio in general
     * .mp3 file output is longer than it should
-* FFT alignment algorithm introduces clicks in certian audio
-  * Example album with introduced clicks: SOPHIE - "PRODUCT" (2025 Reissue)
+* FFT alignment algorithm introduces clicks/distortion in certian audio
+  * Main test song: SOPHIE - "JUST LIKE WE NEVER SAID GOODBYE"
   * Likely caused by short-time Fourier transform (STFT)
-    * Clicks loudness affected by window choice and overlapping
-  * Likely caused by alignment algorithm
-    * Phase angle may not be preserved between FFTs
+    * Click loudness affected by FFT length and number of FFT overlaps
+      * Currently using a flat top window with 5 cosine terms and overlap-adding 6n FFTs
+    * Possible substitute: overlap-adding 6n FFTs over the whole song instead of doing STFTs
+      * Issues: requires 3x or more memory for accurate zero-padding; could still cause smearing
+    * Possible substitute: complex wavelet instead of STFT
+      * Issues: no known implementation of the Hilbert transform to create the imaginary component of audio
 * FFT introduces relatively minor transient smearing / pre-echo
   * Mainly affects very short hi-hats and sounds delayed in one channel
 
@@ -46,6 +43,7 @@ __Things to do__:
   * Force upmixing to stereo?
   * Make sure to bypass phase alignment
 * Make code more idiomatic
+  * Handle all existing `.unwrap()`s
 * Increase program efficiency
   * The current memory usage is good, so the main feature to implement is multithreading
   * Main bottlenecks also seem to be Sympohonia decoding (I/O reading) and hound .wav file-saving (I/O writing)
