@@ -39,6 +39,17 @@ pub fn process_samples(data: (Vec<f32>, Vec<f32>), sample_rate: u32) -> (Vec<f32
     // DC might affect magnitude of N Hz and interpolated values close to it
     remove_dc(&mut left_channel, &mut right_channel);
 
+    // Average out RMS of left and right channels before processing
+    // Might help in phase conflicts
+    let left_mult = (mean_rms / left_rms) as f32;
+    let right_mult = (mean_rms / right_rms) as f32;
+    izip!(left_channel.iter_mut(), right_channel.iter_mut()).for_each(
+        |(left_samp, right_samp)| {
+            *left_samp *= left_mult;
+            *right_samp *= right_mult;
+        },
+    );
+
     // Force minimum reconstructed frequency to N hertz
     // 16hz is used since it's short enough to prevent smearing
     let time_frame = f64::from(sample_rate) / 16.0_f64;
@@ -54,10 +65,12 @@ pub fn process_samples(data: (Vec<f32>, Vec<f32>), sample_rate: u32) -> (Vec<f32
     // Need to .sqrt() the RMS to get the per-sample multiplier instead of the per-RMS multiplier
     let processed_left_rms = gated_rms(&processed_left, sample_rate);
     let processed_right_rms = gated_rms(&processed_right, sample_rate);
+    let processed_left_mult = (mean_rms / processed_left_rms) as f32;
+    let processed_right_mult = (mean_rms / processed_right_rms) as f32;
     izip!(processed_left.iter_mut(), processed_right.iter_mut()).for_each(
         |(left_samp, right_samp)| {
-            *left_samp *= (mean_rms / processed_left_rms) as f32;
-            *right_samp *= (mean_rms / processed_right_rms) as f32;
+            *left_samp *= processed_left_mult;
+            *right_samp *= processed_right_mult;
         },
     );
 

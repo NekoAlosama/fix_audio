@@ -26,13 +26,14 @@ __Known problems I can't seem to fix__:
     * .mp3 file output is longer than it should
 * FFT alignment algorithm introduces clicks/distortion in certian audio
   * Main test song: SOPHIE - "JUST LIKE WE NEVER SAID GOODBYE"
+    * Bass might just be highly uncorrelated with each other between channels?
   * Likely caused by short-time Fourier transform (STFT)
     * Click loudness affected by FFT length and number of FFT overlaps
       * Currently using a flat top window with 5 cosine terms and overlap-adding 6n FFTs
     * Possible substitute: overlap-adding 6n FFTs over the whole song instead of doing STFTs
       * Issues: requires 3x or more memory for accurate zero-padding; could still cause smearing
     * Possible substitute: complex wavelet instead of STFT
-      * Issues: no known implementation of the Hilbert transform to create the imaginary component of audio
+      * Issues: no known implementation of the inverse wavelet in Rust
 * FFT introduces relatively minor transient smearing / pre-echo
   * Mainly affects very short hi-hats and sounds delayed in one channel
 

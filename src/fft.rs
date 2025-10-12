@@ -20,6 +20,7 @@ fn align(original_left: &mut Complex<f32>, original_right: &mut Complex<f32>) {
     let sum = *original_left + *original_right;
     let sum_sqr_recip = sum.norm_sqr().recip(); // Should never be subnormal
     if sum_sqr_recip.is_finite() {
+        // This catches most cases
         *original_left = sum.scale((original_left.norm_sqr() * sum_sqr_recip).sqrt());
         *original_right = sum.scale((original_right.norm_sqr() * sum_sqr_recip).sqrt());
     } else {
@@ -46,12 +47,12 @@ fn fft_process(
     r2c: &Arc<dyn RealToComplex<f32>>,
     c2r: &Arc<dyn ComplexToReal<f32>>,
     window: &[f32],
+    fft_size: usize,
     mut left_channel: Vec<f32>,
     mut right_channel: Vec<f32>,
 ) -> (Vec<f32>, Vec<f32>) {
     let time_frame = window.len();
 
-    let fft_size = time_frame.next_power_of_two();
     let recip_fft = (fft_size as f64).recip() as f32;
 
     // The algorithm I want to use will chunk each signal by sample_rate, so it's better to round up
@@ -192,21 +193,21 @@ pub fn overlapping_fft(
 
     let window = window(rounded_time_frame);
     let fft_size = rounded_time_frame.next_power_of_two();
-    let mut planner = RealFftPlanner::<f32>::new();
-    let r2c: Arc<dyn RealToComplex<f32>> = planner.plan_fft_forward(fft_size);
-    let c2r: Arc<dyn ComplexToReal<f32>> = planner.plan_fft_inverse(fft_size);
+    let mut planner = RealFftPlanner::new();
+    let r2c = planner.plan_fft_forward(fft_size);
+    let c2r = planner.plan_fft_inverse(fft_size);
 
-    let number_of_overlaps = 36_i32; // at least one overlap per term in window
+    let number_of_overlaps = 6_i32; // at least one overlap per term in window
+    let f64_noo_recip = f64::from(number_of_overlaps).recip();
     (0_i32..number_of_overlaps).for_each(|notch| {
-        let offset = (time_frame * f64::from(notch) / f64::from(number_of_overlaps))
-            .round_ties_even() as usize;
+        let offset = (time_frame * f64::from(notch) * f64_noo_recip).round_ties_even() as usize;
         let mut offset_left = vec![0.0_f32; offset];
         let mut offset_right = vec![0.0_f32; offset];
         offset_left.extend(left_channel.iter());
         offset_right.extend(right_channel.iter());
 
         let (processed_left, processed_right) =
-            fft_process(&r2c, &c2r, &window, offset_left, offset_right);
+            fft_process(&r2c, &c2r, &window, fft_size, offset_left, offset_right);
         izip!(
             holding_left.iter_mut(),
             holding_right.iter_mut(),
@@ -217,6 +218,13 @@ pub fn overlapping_fft(
             *hold_left += *proc_left;
             *hold_right += *proc_right;
         });
+    });
+
+    // Correct for overlapping
+    let f32_noo_recip = f64_noo_recip as f32;
+    izip!(holding_left.iter_mut(), holding_right.iter_mut()).for_each(|(hold_left, hold_right)| {
+        *hold_left *= f32_noo_recip;
+        *hold_right *= f32_noo_recip;
     });
 
     (holding_left, holding_right)
