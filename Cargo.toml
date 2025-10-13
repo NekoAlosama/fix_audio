@@ -39,7 +39,7 @@ suspicious =    {level = "warn", priority = -1}
 blanket_clippy_restriction_lints =  "allow" # reason = "whitelist seens better than blacklist" 
 
 restriction =   {level = "warn", priority = -1}
-as_conversions =                "allow" #  reason = "some conversions are required, other cast_* lints are still used"
+as_conversions =                "allow" # reason = "some conversions are required, other cast_* lints are still used"
 cast_sign_loss =                "allow" # reason = "only positive/unsigned values used" 
 #expect_used = "allow" # reason = "currently questioning whether to handle all expect errors or not"
 float_arithmetic =              "allow" # reason = "float arithmetic is required"
@@ -47,7 +47,7 @@ implicit_return =               "allow" # reason = "make things rusty"
 missing_docs_in_private_items = "allow" # reason = "lint isn't very specific"
 print_stdout =                  "allow" # reason = "printing to console is required"
 question_mark_used =            "allow" # reason = "no need to add additional error info"
-semicolon_outside_block =       "allow" #  reason = "personal preference"
+semicolon_outside_block =       "allow" # reason = "personal preference"
 separated_literal_suffix =      "allow" # reason = "personal preference"
 single_call_fn =                "allow" # reason = "allow breaking long functions into smaller functions"
 #unwrap_in_result = "allow" # reason = "currently questioning whether to handle all unwrap errors or not"

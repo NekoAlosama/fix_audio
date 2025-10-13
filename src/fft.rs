@@ -1,40 +1,49 @@
 use core::f64::consts::TAU;
 use itertools::izip;
-use realfft::{RealFftPlanner, num_complex::Complex};
+use realfft::{RealFftPlanner, num_complex::Complex, num_traits::Zero as _};
 
-/// Align the phase of the left and right channels using the circular mean / true midpoint
-/// Using this method makes the resulting phase match the downmixed signal phase (left + right / 2),
-///   i.e. zero-crossings should match with mid channel
+/// Limit phase difference between channels to 90 degress. This prevents phase cancellation occuring at >90 degree phase
+/// The original algorithm made each channel a scaled verison of `sum`. However, this causes rapid phase shifts
+///   between channels if the sum was near zero between FFTs.
+/// This new algorithm adds the original channel to the sum and keeps the property that `left_norm + right_norm == true_modified_left.norm() + true_modified_right.norm()`
 /// Higher weight towards higher magnitude, so the channel with the higher magnitude doesn't rotate much,
 ///   while the smaller magnitude channel may rotate a lot
 #[expect(
     clippy::arithmetic_side_effects,
     reason = "clippy thinks the operations done on Complex<f32> are for integers"
 )]
+#[expect(
+    clippy::inline_always,
+    reason = "benchmarked, more consistent performance with inlining"
+)]
+#[inline(always)]
 fn align(original_left: &mut Complex<f32>, original_right: &mut Complex<f32>) {
-    let sum = *original_left + *original_right;
-    let sum_sqr_recip = sum.norm_sqr().recip(); // Division-by-near-zero check
-    if sum_sqr_recip.is_finite() {
-        // This catches almost all cases
-        *original_left = sum.scale(f32::sqrt(original_left.norm_sqr() * sum_sqr_recip));
-        *original_right = sum.scale(f32::sqrt(original_right.norm_sqr() * sum_sqr_recip));
-    } else {
-        // This case should occur if sum.norm_sqr() is subnormal or 0.0
-        // In such a case, we should try doing .norm() which uses .hypot(), which might get us out of subnormality
-        // NOTE: .norm_sqr().sqrt() can give different results from .hypot(), and I don't know whether both can give subnormal numbers
-        let sum_norm_recip = sum.norm().recip(); // Second division-by-near-zero check
-        let left_norm = original_left.norm();
-        let right_norm = original_right.norm();
+    // Clicks still present unfortunately
+    // .norm_sqr().sqrt() is used over .hypot() for efficiency
+    let left_norm = original_left.norm_sqr().sqrt();
+    let right_norm = original_right.norm_sqr().sqrt();
+    let target_magnitude = left_norm + right_norm;
 
-        if sum_norm_recip.is_finite() {
-            *original_left = sum.scale(left_norm * sum_norm_recip);
-            *original_right = sum.scale(right_norm * sum_norm_recip);
-        } else {
-            // In the very rare case that sum.norm() is still subnormal or 0.0,
-            //   assume that there is zero phase, i.e. 0.0i
-            *original_left = Complex::new(left_norm, 0.0_f32);
-            *original_right = Complex::new(right_norm, 0.0_f32);
-        }
+    let sum = *original_left + *original_right;
+    let sum_norm = sum.norm_sqr().sqrt();
+    let normalized_sum = sum / sum_norm;
+    let modified_left = *original_left + normalized_sum * left_norm; // normalized_sum * left_norm would be what the original algorithm had
+    let modified_right = *original_right + normalized_sum * right_norm;
+    let incorrect_magnitude = modified_left.norm_sqr().sqrt() + modified_right.norm_sqr().sqrt();
+    let multiplier = target_magnitude / incorrect_magnitude;
+    let true_modifed_left = modified_left * multiplier;
+    let true_modifed_right = modified_right * multiplier;
+
+    if true_modifed_left.is_finite() && true_modifed_right.is_finite() {
+        // Ideally, any NaNs and Inf's should be caught by the above
+        *original_left = true_modifed_left;
+        *original_right = true_modifed_right;
+    } else if true_modifed_left.norm_sqr().sqrt() < true_modifed_right.norm_sqr().sqrt() {
+        *original_left = Complex::zero();
+        *original_right *= 2.0_f32;
+    } else {
+        *original_left *= 2.0_f32;
+        *original_right = Complex::zero();
     }
 }
 

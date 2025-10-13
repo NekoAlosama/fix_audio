@@ -2,7 +2,7 @@
 Pet project of processing audio files by and for NekoAlosma to learn FFT processing
 
 Currently, this program takes in stereo audio files (input folder created on first run) and:
-* Aligns phase information between the left and right channel
+* Aligns the phase angle between the left and right channel (Max of 90 degrees)
   * Concept based on Thimeo Stereo Tool's "Image phase amplifier: 0%", automated through Thimeo WatchCat
   * Use case: switching between a mono speaker to a car stereo
     * Prevents per-frequency phase cancellation for a better downmix to mono
@@ -11,7 +11,7 @@ Currently, this program takes in stereo audio files (input folder created on fir
   * Concept based on iZotope RX 11's "Azimuth" module, can't be automated
   * Use case: ensure that one channel doesn't overpower the other over the course of a track
     * Uses the EBU R 128 Integrated Loudness, while RX 11 uses plain RMS
-    * Plain RMS is affected by DC bias
+    * Plain RMS is affected by DC bias and does not account for human hearing
 * Add DC noise to reduce peak levels
   * Currently being used to test where and when DC noise is noticable. If so, this will be replaced with a DC removal step
   * Use case: Reduce peak levels while keeping the same loudness
@@ -34,6 +34,7 @@ __Known problems I can't seem to fix__:
     * Chunks/hopping seems to be working correctly
     * Click loudness mainly affected by FFT length and number of FFT overlaps
       * Partially affected by window choice, but that seems more like a spectral leakage problem
+      * Click loudness also mitigated through improved alignment algorithm
     * Possible substitute: full-song FFTs
       * Issues: needs too many overlaps to reduce, but not eliminate, frequency smearing; needs a decent amount of memory
     * Possible substitute: complex wavelet instead of STFT
