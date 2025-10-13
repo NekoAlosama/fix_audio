@@ -1,8 +1,6 @@
-extern crate alloc;
-use alloc::sync::Arc;
 use core::f64::consts::TAU;
 use itertools::izip;
-use realfft::{ComplexToReal, RealFftPlanner, RealToComplex, num_complex::Complex};
+use realfft::{RealFftPlanner, num_complex::Complex};
 
 /// Align the phase of the left and right channels using the circular mean / true midpoint
 /// Using this method makes the resulting phase match the downmixed signal phase (left + right / 2),
@@ -14,17 +12,17 @@ use realfft::{ComplexToReal, RealFftPlanner, RealToComplex, num_complex::Complex
     reason = "clippy thinks the operations done on Complex<f32> are for integers"
 )]
 fn align(original_left: &mut Complex<f32>, original_right: &mut Complex<f32>) {
-    // TODO: find better algorithm
-    // For some reason, this causes a noticable amount of clicks when processing songs
-    //   with loud bass. In the meantime, we could add error checking
     let sum = *original_left + *original_right;
-    let sum_sqr_recip = sum.norm_sqr().recip(); // Should never be subnormal
+    let sum_sqr_recip = sum.norm_sqr().recip(); // Division-by-near-zero check
     if sum_sqr_recip.is_finite() {
-        // This catches most cases
-        *original_left = sum.scale((original_left.norm_sqr() * sum_sqr_recip).sqrt());
-        *original_right = sum.scale((original_right.norm_sqr() * sum_sqr_recip).sqrt());
+        // This catches almost all cases
+        *original_left = sum.scale(f32::sqrt(original_left.norm_sqr() * sum_sqr_recip));
+        *original_right = sum.scale(f32::sqrt(original_right.norm_sqr() * sum_sqr_recip));
     } else {
-        let sum_norm_recip = sum.norm().recip(); // Should never be subnormal
+        // This case should occur if sum.norm_sqr() is subnormal or 0.0
+        // In such a case, we should try doing .norm() which uses .hypot(), which might get us out of subnormality
+        // NOTE: .norm_sqr().sqrt() can give different results from .hypot(), and I don't know whether both can give subnormal numbers
+        let sum_norm_recip = sum.norm().recip(); // Second division-by-near-zero check
         let left_norm = original_left.norm();
         let right_norm = original_right.norm();
 
@@ -32,200 +30,174 @@ fn align(original_left: &mut Complex<f32>, original_right: &mut Complex<f32>) {
             *original_left = sum.scale(left_norm * sum_norm_recip);
             *original_right = sum.scale(right_norm * sum_norm_recip);
         } else {
-            // Just flip the phase of the quieter channel in case of conflicts
-            if left_norm < right_norm {
-                *original_left = -*original_left;
-            } else {
-                *original_right = -*original_right;
-            }
+            // In the very rare case that sum.norm() is still subnormal or 0.0,
+            //   assume that there is zero phase, i.e. 0.0i
+            *original_left = Complex::new(left_norm, 0.0_f32);
+            *original_right = Complex::new(right_norm, 0.0_f32);
         }
     }
-}
-
-/// Two-channel FFT processing
-fn fft_process(
-    r2c: &Arc<dyn RealToComplex<f32>>,
-    c2r: &Arc<dyn ComplexToReal<f32>>,
-    window: &[f32],
-    fft_size: usize,
-    mut left_channel: Vec<f32>,
-    mut right_channel: Vec<f32>,
-) -> (Vec<f32>, Vec<f32>) {
-    let time_frame = window.len();
-
-    let recip_fft = (fft_size as f64).recip() as f32;
-
-    // The algorithm I want to use will chunk each signal by sample_rate, so it's better to round up
-    //   to the next multiple so we can use ChunksExact and have no remainder
-    let fft_total = left_channel.len().next_multiple_of(time_frame);
-    left_channel.resize(fft_total, 0.0);
-    right_channel.resize(fft_total, 0.0);
-    left_channel.shrink_to_fit();
-    right_channel.shrink_to_fit();
-
-    // Chunking for later
-    let left_channel_chunks = left_channel.chunks_exact(time_frame);
-    let right_channel_chunks = right_channel.chunks_exact(time_frame);
-
-    // Saving samples for later
-    // .reserve_exact() reduces memory by preventing over-allocation
-    let mut processed_left: Vec<f32> = vec![];
-    let mut processed_right: Vec<f32> = vec![];
-    processed_left.reserve_exact(fft_total);
-    processed_right.reserve_exact(fft_total);
-
-    // Create scratch FFT for `RealFFT`
-    // `RealFFT` uses `RustFFT`'s .process_with_scratch() for its .process() function
-    let mut left_fft = r2c.make_output_vec();
-    let mut right_fft = r2c.make_output_vec();
-
-    // Scratch vec for chunks
-    let mut left = vec![];
-    let mut right = vec![];
-    left.reserve_exact(fft_size);
-    right.reserve_exact(fft_size);
-
-    izip!(left_channel_chunks, right_channel_chunks).for_each(|(left_chunk, right_chunk)| {
-        left.extend(left_chunk);
-        right.extend(right_chunk);
-
-        // length is now sample_rate + 1
-        // Skip the first element, which should be zero for all of these iterators
-        izip!(left.iter_mut(), right.iter_mut(), window.iter()).for_each(
-            |(left_point, right_point, window_multiplier)| {
-                *left_point *= window_multiplier;
-                *right_point *= window_multiplier;
-            },
-        );
-
-        left.resize(fft_size, 0.0_f32);
-        right.resize(fft_size, 0.0_f32);
-
-        // Ignore errors by `RealFFT`
-        // `RustFFT` does not return a Result after processing,
-        //   but `RealFFT` does return Results due to some zero-check
-        //   `RealFFT` author says to just ignore these in the meantime.
-        // https://github.com/HEnquist/realfft/issues/41#issuecomment-2050347470
-        _ = r2c.process(&mut left, &mut left_fft);
-        _ = r2c.process(&mut right, &mut right_fft);
-
-        // The first bin is the DC bin, which is the average unheard noise
-        // It's better to handle DC in the time domain, not the frequency domain,
-        //   so we skip it
-        izip!(left_fft.iter_mut(), right_fft.iter_mut())
-            .skip(1)
-            .for_each(|(left_fft_point, right_fft_point)| {
-                align(left_fft_point, right_fft_point);
-            });
-
-        _ = c2r.process(&mut left_fft, &mut left);
-        _ = c2r.process(&mut right_fft, &mut right);
-
-        // Remove FFT silence
-        left.truncate(time_frame);
-        right.truncate(time_frame);
-
-        izip!(left.iter_mut(), right.iter_mut()).for_each(|(left_samp, right_samp)| {
-            *left_samp *= recip_fft;
-            *right_samp *= recip_fft;
-        });
-
-        // Scratch Vec's are cleared by these lines
-        processed_left.append(&mut left);
-        processed_right.append(&mut right);
-    });
-
-    (processed_left, processed_right)
 }
 
 /// Windowing is used to make the signal chunk fade in and out
 ///   to prevent discontinuities, which causes spectral leakage (noise tuned to the music).
 fn window(time_frame: usize) -> Box<[f32]> {
-    let f64_rate = time_frame as f64;
+    let f64_rate_recip = (time_frame as f64).recip();
     // The actual level of the window doesn't really matter
     // Window selection: minimize side-lobe level, ignore bandwidth of main lobe?
     (0..time_frame)
         .map(|n| {
-            (
-                // 6-term (5 cosines and 1 constant) HFT116D window,
-                //   flat top window with -116.8dB max leakage, but is pretty wide
-                // In backwards order due to mul_add
-                // https://holometer.fnal.gov/GH_FFT.pdf
-                f64::mul_add(
-                    -0.006_628_8_f64,
-                    f64::cos(5.0_f64 * TAU * n as f64 / f64_rate),
-                    f64::mul_add(
-                        0.122_838_9_f64,
-                        f64::cos(4.0_f64 * TAU * n as f64 / f64_rate),
-                        f64::mul_add(
-                            -0.636_743_1_f64,
-                            f64::cos(3.0_f64 * TAU * n as f64 / f64_rate),
-                            f64::mul_add(
-                                1.478_070_5_f64,
-                                f64::cos(2.0_f64 * TAU * n as f64 / f64_rate),
-                                f64::mul_add(
-                                    -1.957_537_5_f64,
-                                    f64::cos(TAU * n as f64 / f64_rate),
-                                    1.0_f64,
-                                ),
-                            ),
-                        ),
-                    ),
-                )
-            ) as f32
+            // 6-term (5 cosines and 1 constant) HFT116D window,
+            //   flat top window with -116.8dB max leakage, but is pretty wide
+            // https://holometer.fnal.gov/GH_FFT.pdf
+
+            // List of coefficients, where the first term is the constant (multiplier * cos(0) == multiplier)
+            [
+                1.0_f64,
+                -1.957_537_5_f64,
+                1.478_070_5_f64,
+                -0.636_743_1_f64,
+                0.122_838_9_f64,
+                -0.006_628_8_f64,
+            ]
+            .iter()
+            .enumerate()
+            .map(|(index, multiplier)| {
+                multiplier * f64::cos(index as f64 * TAU * n as f64 * f64_rate_recip)
+            })
+            .sum::<f64>() as f32
         })
         .collect()
 }
 
 /// Specific overlapping
 pub fn overlapping_fft(
+    planner: &mut RealFftPlanner<f32>,
     time_frame: f64,
-    left_channel: &[f32],
-    right_channel: &[f32],
+    left_channel: Vec<f32>,
+    right_channel: Vec<f32>,
 ) -> (Vec<f32>, Vec<f32>) {
     let original_length = left_channel.len();
-    let mut holding_left = vec![0.0_f32; original_length];
-    let mut holding_right = vec![0.0_f32; original_length];
-    holding_left.shrink_to_fit();
-    holding_right.shrink_to_fit();
 
+    // Idea is that time_frame gives us the amount of samples (possibly fractional) that we need to FFT
     let rounded_time_frame = time_frame.round_ties_even() as usize;
+    // We should pad with half-a-second of silence to allow for half-windows at the beginning and end
+    let half_time_frame = (time_frame * 0.5_f64).round_ties_even() as usize;
 
-    let window = window(rounded_time_frame);
+    // Lots of Vecs are used here to reuse memory space instead of reallocating
     let fft_size = rounded_time_frame.next_power_of_two();
-    let mut planner = RealFftPlanner::new();
+    let fft_norm = (fft_size as f64).recip() as f32;
     let r2c = planner.plan_fft_forward(fft_size);
     let c2r = planner.plan_fft_inverse(fft_size);
+    let mut left_chunk = Vec::with_capacity(fft_size);
+    let mut right_chunk = Vec::with_capacity(fft_size);
+    let mut left_complex = r2c.make_output_vec();
+    let mut right_complex = r2c.make_output_vec();
+    let mut scratch_complex = r2c.make_scratch_vec();
+    let mut scratch_real = c2r.make_scratch_vec();
 
-    let number_of_overlaps = 6_i32; // at least one overlap per term in window
-    let f64_noo_recip = f64::from(number_of_overlaps).recip();
-    (0_i32..number_of_overlaps).for_each(|notch| {
-        let offset = (time_frame * f64::from(notch) * f64_noo_recip).round_ties_even() as usize;
-        let mut offset_left = vec![0.0_f32; offset];
-        let mut offset_right = vec![0.0_f32; offset];
-        offset_left.extend(left_channel.iter());
-        offset_right.extend(right_channel.iter());
+    // This consumes left_channel and right_channel
+    let mut extended_left = vec![0.0_f32; half_time_frame]; // Allow half-window at start
+    let mut extended_right = vec![0.0_f32; half_time_frame];
+    extended_left.extend(left_channel);
+    extended_right.extend(right_channel);
+    extended_left.extend(vec![0.0_f32; fft_size]); // Allow for last FFT chunk to be added
+    extended_right.extend(vec![0.0_f32; fft_size]);
+    let extended_length = extended_left.len();
 
-        let (processed_left, processed_right) =
-            fft_process(&r2c, &c2r, &window, fft_size, offset_left, offset_right);
-        izip!(
-            holding_left.iter_mut(),
-            holding_right.iter_mut(),
-            processed_left.iter().skip(offset),
-            processed_right.iter().skip(offset)
-        )
-        .for_each(|(hold_left, hold_right, proc_left, proc_right)| {
-            *hold_left += *proc_left;
-            *hold_right += *proc_right;
+    let mut holding_left = vec![0.0_f32; extended_length];
+    let mut holding_right = vec![0.0_f32; extended_length];
+    let mut holding_position = 0_usize;
+
+    let window = window(rounded_time_frame);
+
+    // Window has 6 terms (5 cosine and 1 constant), so we need to add at least 6 shifted chunks to get a constant output level
+    // doing more chunks will help with clicking/zipper noise, but will of course increase runtime
+    let hop_time_frame = 1.0_f64 / 6.0_f64;
+    let hop_size = (time_frame * hop_time_frame).round_ties_even() as usize;
+
+    // Up until the end, which should be basically a half-window
+    while holding_position <= usize::strict_sub(extended_length, rounded_time_frame) {
+        left_chunk.extend(
+            extended_left
+                .iter()
+                .skip(holding_position)
+                .take(rounded_time_frame),
+        );
+        right_chunk.extend(
+            extended_right
+                .iter()
+                .skip(holding_position)
+                .take(rounded_time_frame),
+        );
+
+        izip!(left_chunk.iter_mut(), right_chunk.iter_mut(), window.iter()).for_each(
+            |(left_samp, right_samp, window_mult)| {
+                *left_samp *= *window_mult;
+                *right_samp *= *window_mult;
+            },
+        );
+
+        left_chunk.resize(fft_size, 0.0_f32);
+        right_chunk.resize(fft_size, 0.0_f32);
+
+        _ = r2c.process_with_scratch(&mut left_chunk, &mut left_complex, &mut scratch_complex);
+        _ = r2c.process_with_scratch(&mut right_chunk, &mut right_complex, &mut scratch_complex);
+
+        // .skip(1) is needed to ignore the DC bin, which is the average vertical offset
+        // It shouldn't be changed in case the vertical offset is actually just a very low frequency
+        // TODO: check for songs where .skip(1) is absolutely necessary
+        izip!(left_complex.iter_mut(), right_complex.iter_mut())
+            .skip(1)
+            .for_each(|(left_point, right_point)| {
+                align(left_point, right_point);
+            });
+
+        // left_chunk and right_chunk will be overwritten
+        _ = c2r.process_with_scratch(&mut left_complex, &mut left_chunk, &mut scratch_real);
+        _ = c2r.process_with_scratch(&mut right_complex, &mut right_chunk, &mut scratch_real);
+
+        // RustFFT, and in turn RealFFT, do not perform post-FFT normalization
+        izip!(left_chunk.iter_mut(), right_chunk.iter_mut()).for_each(|(left_samp, right_samp)| {
+            *left_samp *= fft_norm;
+            *right_samp *= fft_norm;
         });
-    });
 
-    // Correct for overlapping
-    let f32_noo_recip = f64_noo_recip as f32;
+        #[expect(
+            clippy::iter_with_drain,
+            reason = "nursery lint, .drain(..) is needed to clear the vec"
+        )]
+        izip!(
+            holding_left.iter_mut().skip(holding_position),
+            holding_right.iter_mut().skip(holding_position),
+            left_chunk.drain(..),
+            right_chunk.drain(..)
+        )
+        .for_each(|(hold_left, hold_right, left_samp, right_samp)| {
+            *hold_left += left_samp;
+            *hold_right += right_samp;
+        });
+
+        holding_position = usize::strict_add(holding_position, hop_size);
+    }
+
+    let f32_hop_time_frame = hop_time_frame as f32;
     izip!(holding_left.iter_mut(), holding_right.iter_mut()).for_each(|(hold_left, hold_right)| {
-        *hold_left *= f32_noo_recip;
-        *hold_right *= f32_noo_recip;
+        *hold_left *= f32_hop_time_frame;
+        *hold_right *= f32_hop_time_frame;
     });
 
-    (holding_left, holding_right)
+    (
+        holding_left
+            .iter()
+            .skip(half_time_frame)
+            .take(original_length)
+            .copied()
+            .collect(),
+        holding_right
+            .iter()
+            .skip(half_time_frame)
+            .take(original_length)
+            .copied()
+            .collect(),
+    )
 }

@@ -24,29 +24,32 @@ inherits = "release"
 debug = true
 
 [lints.clippy]
-# might be better to change the lint groups to priority=-1
-complexity = "warn"
-correctness = "warn"
-nursery = "warn"
+complexity =    {level = "warn", priority = -1}
+correctness =   {level = "warn", priority = -1}
+nursery =   {level = "warn", priority = -1}
 
-pedantic = "warn"
-cast_precision_loss = {level = "allow", priority = 1} # reason = "allow u64 as f64, likey no precision loss"
-cast_possible_truncation = {level = "allow", priority =1} # reason = "allow using f64 for precision, then truncating to f32"
+pedantic =  {level = "warn", priority = -1}
+cast_precision_loss =       "allow" # reason = "allow u64 as f64, likey no precision loss"
+cast_possible_truncation =  "allow" # reason = "allow using f64 for precision, then truncating to f32"
 
-perf = "warn"
-style = "warn"
+perf =  {level = "warn", priority = -1}
+style = {level = "warn", priority = -1}
 
-suspicious = "warn"
-blanket_clippy_restriction_lints = {level = "allow", priority = 1} # reason = "whitelist seens better than blacklist" 
+suspicious =    {level = "warn", priority = -1}
+blanket_clippy_restriction_lints =  "allow" # reason = "whitelist seens better than blacklist" 
 
-restriction = "warn"
-as_conversions = {level = "allow", priority = 1} #  reason = "some conversions are required, other cast_* lints are still used"
-cast_sign_loss = {level = "allow", priority = 1 } # reason ="only positive/unsigned values used" 
-float_arithmetic = {level = "allow", priority = 1 } # reason ="float arithmetic is required"
-implicit_return = {level = "allow", priority = 1 } # reason ="make things rusty"
-print_stdout = {level = "allow", priority = 1  } # reason = "printing to console is required"
-question_mark_used = {level = "allow", priority = 1 } # reason = "no need to add additional error info"
-semicolon_outside_block = {level = "allow", priority = 1 } #  reason = "personal preference"
-separated_literal_suffix = {level = "allow", priority = 1 } # reason = "personal preference"
-single_call_fn = {level = "allow", priority = 1 } # reason = "allow breaking long functions into smaller functions"
-use_debug = {level = "allow", priority = 1} #  reason = "pretty print is good enough"
+restriction =   {level = "warn", priority = -1}
+as_conversions =                "allow" #  reason = "some conversions are required, other cast_* lints are still used"
+cast_sign_loss =                "allow" # reason = "only positive/unsigned values used" 
+#expect_used = "allow" # reason = "currently questioning whether to handle all expect errors or not"
+float_arithmetic =              "allow" # reason = "float arithmetic is required"
+implicit_return =               "allow" # reason = "make things rusty"
+missing_docs_in_private_items = "allow" # reason = "lint isn't very specific"
+print_stdout =                  "allow" # reason = "printing to console is required"
+question_mark_used =            "allow" # reason = "no need to add additional error info"
+semicolon_outside_block =       "allow" #  reason = "personal preference"
+separated_literal_suffix =      "allow" # reason = "personal preference"
+single_call_fn =                "allow" # reason = "allow breaking long functions into smaller functions"
+#unwrap_in_result = "allow" # reason = "currently questioning whether to handle all unwrap errors or not"
+#unwrap_used = "allow" # reason = "currently questioning whether to handle all unwrap errors or not"
+use_debug =                     "allow" #  reason = "pretty print is good enough"

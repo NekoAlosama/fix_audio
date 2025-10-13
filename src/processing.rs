@@ -1,26 +1,27 @@
 use crate::fft;
 use ebur128::{EbuR128, Mode};
 use itertools::{Itertools as _, izip};
+use realfft::RealFftPlanner;
 
 /// EBU R 128 Integrated Loudness calculation
 /// Basically a two-pass windowed RMS.
 ///   First pass is used to detect and ignore silence at -70dB
 ///   Second pass is used to detect and ignore quieter points at the first-pass RMS minus 10dB
-fn gated_rms(samples: &Vec<f32>, sample_rate: u32) -> f64 {
+fn gated_rms(samples: &[f32], sample_rate: u32) -> f64 {
     let mut ebur128 = EbuR128::new(1_u32, sample_rate, Mode::I).expect("Shouldn't happen");
     // Planar sucks since it requires an array of channel arrays, so for one channel, it needs an array around it
     // f64 samples are not needed
-    _ = ebur128.add_frames_f32(&samples.to_owned());
+    _ = ebur128.add_frames_f32(samples);
     let loudness = ebur128.loudness_global().expect("Shouldn't happen");
 
-    10.0_f64.powf(loudness / 20.0_f64)
+    10.0_f64.powf(loudness * 0.05_f64)
 }
 
 /// Static DC removal
 fn remove_dc(channel_1: &mut [f32], channel_2: &mut [f32]) {
-    let length = channel_1.len() as f32;
-    let first_dc = channel_1.iter().sum::<f32>() / length;
-    let second_dc = channel_2.iter().sum::<f32>() / length;
+    let length_recip = (channel_1.len() as f64).recip() as f32;
+    let first_dc = channel_1.iter().sum::<f32>() * length_recip;
+    let second_dc = channel_2.iter().sum::<f32>() * length_recip;
     izip!(channel_1.iter_mut(), channel_2.iter_mut()).for_each(|(first, second)| {
         *first -= first_dc;
         *second -= second_dc;
@@ -28,7 +29,11 @@ fn remove_dc(channel_1: &mut [f32], channel_2: &mut [f32]) {
 }
 
 /// All three processing steps into one function
-pub fn process_samples(data: (Vec<f32>, Vec<f32>), sample_rate: u32) -> (Vec<f32>, Vec<f32>) {
+pub fn process_samples(
+    planner: &mut RealFftPlanner<f32>,
+    data: (Vec<f32>, Vec<f32>),
+    sample_rate: u32,
+) -> (Vec<f32>, Vec<f32>) {
     let mut left_channel = data.0;
     let mut right_channel = data.1;
     let left_rms = gated_rms(&left_channel, sample_rate);
@@ -43,20 +48,16 @@ pub fn process_samples(data: (Vec<f32>, Vec<f32>), sample_rate: u32) -> (Vec<f32
     // Might help in phase conflicts
     let left_mult = (mean_rms / left_rms) as f32;
     let right_mult = (mean_rms / right_rms) as f32;
-    izip!(left_channel.iter_mut(), right_channel.iter_mut()).for_each(
-        |(left_samp, right_samp)| {
-            *left_samp *= left_mult;
-            *right_samp *= right_mult;
-        },
-    );
+    izip!(left_channel.iter_mut(), right_channel.iter_mut()).for_each(|(left_samp, right_samp)| {
+        *left_samp *= left_mult;
+        *right_samp *= right_mult;
+    });
 
     // Force minimum reconstructed frequency to N hertz
     // 16hz is used since it's short enough to prevent smearing
-    let time_frame = f64::from(sample_rate) / 16.0_f64;
+    let time_frame = f64::from(sample_rate) / 16.0_f64; // actually in number of samples
     let (mut processed_left, mut processed_right) =
-        fft::overlapping_fft(time_frame, &left_channel, &right_channel);
-    drop(left_channel);
-    drop(right_channel);
+        fft::overlapping_fft(planner, time_frame, left_channel, right_channel);
 
     // Remove DC after processing
     remove_dc(&mut processed_left, &mut processed_right);

@@ -24,17 +24,21 @@ __Known problems I can't seem to fix__:
   * Try converting music files to .wav
     * .opus files or video files containing audio in general
     * .mp3 file output is longer than it should
-* FFT alignment algorithm introduces clicks/distortion in certian audio
+* FFT alignment algorithm introduces clicks/distortion/zipper noise in certian audio
   * Main test song: SOPHIE - "JUST LIKE WE NEVER SAID GOODBYE"
-    * Bass might just be highly uncorrelated with each other between channels?
+    * Disconinuity at the start and end of some sections of audio
+    * Bass between channels might just be highly uncorrelated?
   * Likely caused by short-time Fourier transform (STFT)
-    * Click loudness affected by FFT length and number of FFT overlaps
-      * Currently using a flat top window with 5 cosine terms and overlap-adding 6n FFTs
-    * Possible substitute: overlap-adding 6n FFTs over the whole song instead of doing STFTs
-      * Issues: requires 3x or more memory for accurate zero-padding; could still cause smearing
+    * FFT itself is working correctly
+    * Window is working correctly
+    * Chunks/hopping seems to be working correctly
+    * Click loudness mainly affected by FFT length and number of FFT overlaps
+      * Partially affected by window choice, but that seems more like a spectral leakage problem
+    * Possible substitute: full-song FFTs
+      * Issues: needs too many overlaps to reduce, but not eliminate, frequency smearing; needs a decent amount of memory
     * Possible substitute: complex wavelet instead of STFT
-      * Issues: no known implementation of the inverse wavelet in Rust
-* FFT introduces relatively minor transient smearing / pre-echo
+      * Issues: no known implementation of the inverse (discrete or continuous) complex wavelet transform in Rust
+* FFT introduces relatively minor frequency smearing / pre-echo
   * Mainly affects very short hi-hats and sounds delayed in one channel
 
 __Things to do__:
@@ -44,7 +48,7 @@ __Things to do__:
   * Force upmixing to stereo?
   * Make sure to bypass phase alignment
 * Make code more idiomatic
-  * Handle all existing `.unwrap()`s
+  * Handle all existing `.unwrap()`s and `.expect()`s
 * Increase program efficiency
   * The current memory usage is good, so the main feature to implement is multithreading
   * Main bottlenecks also seem to be Sympohonia decoding (I/O reading) and hound .wav file-saving (I/O writing)
