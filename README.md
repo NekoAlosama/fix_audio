@@ -2,7 +2,7 @@
 Pet project of processing audio files by and for NekoAlosma to learn FFT processing
 
 Currently, this program takes in stereo audio files (input folder created on first run) and:
-* Aligns the phase angle between the left and right channel (Max of 90 degrees)
+* Aligns the phase angle between the left and right channel
   * Concept based on Thimeo Stereo Tool's "Image phase amplifier: 0%", automated through Thimeo WatchCat
   * Use case: switching between a mono speaker to a car stereo
     * Prevents per-frequency phase cancellation for a better downmix to mono

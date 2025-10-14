@@ -1,6 +1,7 @@
 use crate::fft;
 use ebur128::{EbuR128, Mode};
 use itertools::{Itertools as _, izip};
+use rand::rngs::ThreadRng;
 use realfft::RealFftPlanner;
 
 /// EBU R 128 Integrated Loudness calculation
@@ -30,6 +31,7 @@ fn remove_dc(channel_1: &mut [f32], channel_2: &mut [f32]) {
 
 /// All three processing steps into one function
 pub fn process_samples(
+    rng: &mut ThreadRng,
     planner: &mut RealFftPlanner<f32>,
     data: (Vec<f32>, Vec<f32>),
     sample_rate: u32,
@@ -57,7 +59,7 @@ pub fn process_samples(
     // 16hz is used since it's short enough to prevent smearing
     let time_frame = f64::from(sample_rate) / 16.0_f64; // actually in number of samples
     let (mut processed_left, mut processed_right) =
-        fft::overlapping_fft(planner, time_frame, left_channel, right_channel);
+        fft::overlapping_fft(rng, planner, time_frame, left_channel, right_channel);
 
     // Remove DC after processing
     remove_dc(&mut processed_left, &mut processed_right);

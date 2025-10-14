@@ -1,11 +1,12 @@
 use core::f64::consts::TAU;
 use itertools::izip;
+use rand::{Rng as _, rngs::ThreadRng};
 use realfft::{RealFftPlanner, num_complex::Complex, num_traits::Zero as _};
 
-/// Limit phase difference between channels to 90 degress. This prevents phase cancellation occuring at >90 degree phase
+/// Aligns the phase angle of the left and right channels
 /// The original algorithm made each channel a scaled verison of `sum`. However, this causes rapid phase shifts
 ///   between channels if the sum was near zero between FFTs.
-/// This new algorithm adds the original channel to the sum and keeps the property that `left_norm + right_norm == true_modified_left.norm() + true_modified_right.norm()`
+/// This new algorithm adds the original channel to the sum, so out-of-phase channels instead silence one channel and double the magnitude of the other.
 /// Higher weight towards higher magnitude, so the channel with the higher magnitude doesn't rotate much,
 ///   while the smaller magnitude channel may rotate a lot
 #[expect(
@@ -17,28 +18,34 @@ use realfft::{RealFftPlanner, num_complex::Complex, num_traits::Zero as _};
     reason = "benchmarked, more consistent performance with inlining"
 )]
 #[inline(always)]
-fn align(original_left: &mut Complex<f32>, original_right: &mut Complex<f32>) {
+fn align(rng: &mut ThreadRng, original_left: &mut Complex<f32>, original_right: &mut Complex<f32>) {
     // Clicks still present unfortunately
     // .norm_sqr().sqrt() is used over .hypot() for efficiency
     let left_norm = original_left.norm_sqr().sqrt();
     let right_norm = original_right.norm_sqr().sqrt();
-    let target_magnitude = left_norm + right_norm;
+    let target_mag = left_norm + right_norm;
 
     let sum = *original_left + *original_right;
     let sum_norm = sum.norm_sqr().sqrt();
     let normalized_sum = sum / sum_norm;
-    let modified_left = *original_left + normalized_sum * left_norm; // normalized_sum * left_norm would be what the original algorithm had
-    let modified_right = *original_right + normalized_sum * right_norm;
-    let incorrect_magnitude = modified_left.norm_sqr().sqrt() + modified_right.norm_sqr().sqrt();
-    let multiplier = target_magnitude / incorrect_magnitude;
-    let true_modifed_left = modified_left * multiplier;
-    let true_modifed_right = modified_right * multiplier;
+    let modified_left_mag = (*original_left + normalized_sum * left_norm)
+        .norm_sqr()
+        .sqrt(); // normalized_sum * left_norm would be what the original algorithm had
+    let modified_right_mag = (*original_right + normalized_sum * right_norm)
+        .norm_sqr()
+        .sqrt();
+    let incorrect_mag = modified_left_mag + modified_right_mag;
+    let modified_sum = normalized_sum * target_mag / incorrect_mag;
+    let true_modifed_left = modified_left_mag * modified_sum;
+    let true_modifed_right = modified_right_mag * modified_sum;
 
     if true_modifed_left.is_finite() && true_modifed_right.is_finite() {
         // Ideally, any NaNs and Inf's should be caught by the above
         *original_left = true_modifed_left;
         *original_right = true_modifed_right;
-    } else if true_modifed_left.norm_sqr().sqrt() < true_modifed_right.norm_sqr().sqrt() {
+    } else if rng.random() {
+        // There isn't really a good way to handle when `sum` near zero
+        // Here, I just randomize which channel to zero out and which to double
         *original_left = Complex::zero();
         *original_right *= 2.0_f32;
     } else {
@@ -80,6 +87,7 @@ fn window(time_frame: usize) -> Box<[f32]> {
 
 /// Specific overlapping
 pub fn overlapping_fft(
+    rng: &mut ThreadRng,
     planner: &mut RealFftPlanner<f32>,
     time_frame: f64,
     left_channel: Vec<f32>,
@@ -154,11 +162,11 @@ pub fn overlapping_fft(
 
         // .skip(1) is needed to ignore the DC bin, which is the average vertical offset
         // It shouldn't be changed in case the vertical offset is actually just a very low frequency
-        // TODO: check for songs where .skip(1) is absolutely necessary
+        // TODO: unsure if skipping DC actually does anything in practice
         izip!(left_complex.iter_mut(), right_complex.iter_mut())
             .skip(1)
             .for_each(|(left_point, right_point)| {
-                align(left_point, right_point);
+                align(rng, left_point, right_point);
             });
 
         // left_chunk and right_chunk will be overwritten

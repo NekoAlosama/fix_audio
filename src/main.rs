@@ -53,6 +53,7 @@ fn main() -> Result<(), Error> {
     // Keeping the time for benchmarking
     let time = time::Instant::now();
     let mut planner = RealFftPlanner::new();
+    let mut rng = rand::rng();
 
     // Check if INPUT_DIR exists, or create it if it doesn't
     match fs::exists(INPUT_DIR) {
@@ -107,7 +108,7 @@ fn main() -> Result<(), Error> {
 
         print!("    Processing... ");
         io::stdout().flush()?;
-        let modified_audio = process_samples(&mut planner, channels, sample_rate);
+        let modified_audio = process_samples(&mut rng, &mut planner, channels, sample_rate);
 
         print!("    Exporting...");
         io::stdout().flush()?;
