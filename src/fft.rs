@@ -1,12 +1,43 @@
 use core::f64::consts::TAU;
 use itertools::izip;
 use rand::{Rng as _, rngs::ThreadRng};
-use realfft::{RealFftPlanner, num_complex::Complex, num_traits::Zero as _};
+use realfft::{
+    RealFftPlanner,
+    num_complex::{Complex, ComplexFloat},
+};
+
+/// Helper function that returns each channel added with the sum of them, scaled to the channel's magnitude.
+/// This basically halves the maximum phase difference between the channels, so one pass makes a 180-degree difference to a 90-degree difference, thus
+///   out-of-phase components just become uncorrelated components (silence in one channel and sound in the other)
+/// The magnitudes are modified to something not worth calculating, so we'll normalize it later
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "clippy thinks the operations done on Complex<f32> are for integers"
+)]
+#[expect(
+    clippy::inline_always,
+    reason = "benchmarked, more consistent performance with inlining"
+)]
+#[inline(always)]
+fn align_helper<T>(left: Complex<T>, right: Complex<T>) -> (Complex<T>, Complex<T>)
+where
+    T: ComplexFloat,
+{
+    let left_norm = left.norm_sqr().sqrt();
+    let right_norm = right.norm_sqr().sqrt();
+    let sum = left + right;
+    let normalized_sum = sum / sum.norm_sqr().sqrt();
+    (
+        left + normalized_sum.scale(left_norm),
+        right + normalized_sum.scale(right_norm),
+    )
+}
 
 /// Aligns the phase angle of the left and right channels
-/// The original algorithm made each channel a scaled verison of `sum`. However, this causes rapid phase shifts
-///   between channels if the sum was near zero between FFTs.
-/// This new algorithm adds the original channel to the sum, so out-of-phase channels instead silence one channel and double the magnitude of the other.
+/// The original algorithm made each channel a scaled verison of `sum`. However, it is very sensitive
+///   around where the sum is near zero
+/// This new algorithm adds the original channel to the sum, so processing out-of-phase components might result in
+///   silencing one channel and doubling the magnitude of the other.
 /// Higher weight towards higher magnitude, so the channel with the higher magnitude doesn't rotate much,
 ///   while the smaller magnitude channel may rotate a lot
 #[expect(
@@ -19,38 +50,55 @@ use realfft::{RealFftPlanner, num_complex::Complex, num_traits::Zero as _};
 )]
 #[inline(always)]
 fn align(rng: &mut ThreadRng, original_left: &mut Complex<f32>, original_right: &mut Complex<f32>) {
-    // Clicks still present unfortunately
+    // If one channel is basically zero, then we can just keep it and exit early
+    // Note that the compiler optimizes the OR statement here
+    if original_left.l1_norm() <= f32::EPSILON || original_right.l1_norm() <= f32::EPSILON {
+        return;
+    }
+
     // .norm_sqr().sqrt() is used over .hypot() for efficiency
+    // Clicks still present unfortunately
     let left_norm = original_left.norm_sqr().sqrt();
     let right_norm = original_right.norm_sqr().sqrt();
     let target_mag = left_norm + right_norm;
-
     let sum = *original_left + *original_right;
-    let sum_norm = sum.norm_sqr().sqrt();
-    let normalized_sum = sum / sum_norm;
-    let modified_left_mag = (*original_left + normalized_sum * left_norm)
-        .norm_sqr()
-        .sqrt(); // normalized_sum * left_norm would be what the original algorithm had
-    let modified_right_mag = (*original_right + normalized_sum * right_norm)
-        .norm_sqr()
-        .sqrt();
-    let incorrect_mag = modified_left_mag + modified_right_mag;
-    let modified_sum = normalized_sum * target_mag / incorrect_mag;
-    let true_modifed_left = modified_left_mag * modified_sum;
-    let true_modifed_right = modified_right_mag * modified_sum;
+    let normalized_sum = sum / sum.norm_sqr().sqrt();
+
+    let (mut modified_left, mut modified_right) = align_helper(*original_left, *original_right); // max 90 degrees and 3.92dB error
+    (modified_left, modified_right) = align_helper(modified_left, modified_right); // max 45 degrees and 0.91dB error
+    (modified_left, modified_right) = align_helper(modified_left, modified_right); // max 22.5 degrees and 0.22dB error
+    (modified_left, modified_right) = align_helper(modified_left, modified_right); // max 11.25 degrees and 0.06dB error
+
+    let modified_left_norm = modified_left.norm_sqr().sqrt();
+    let modified_right_norm = modified_right.norm_sqr().sqrt();
+    let target_mult = target_mag / (modified_left_norm + modified_right_norm);
+    let target_sum = normalized_sum * target_mult;
+    let true_modifed_left = target_sum * modified_left_norm; // Channels are now aligned, so we have idempotence
+    let true_modifed_right = target_sum * modified_right_norm;
 
     if true_modifed_left.is_finite() && true_modifed_right.is_finite() {
         // Ideally, any NaNs and Inf's should be caught by the above
         *original_left = true_modifed_left;
         *original_right = true_modifed_right;
-    } else if rng.random() {
-        // There isn't really a good way to handle when `sum` near zero
-        // Here, I just randomize which channel to zero out and which to double
-        *original_left = Complex::zero();
-        *original_right *= 2.0_f32;
     } else {
-        *original_left *= 2.0_f32;
-        *original_right = Complex::zero();
+        // There isn't really a good way to handle when `sum` is near zero
+        // This case seems to rarely occur anyways, so I probably shouldn't focus too much on it
+        //   ex: "JUST LIKE WE NEVER SAID GOODBYE" activates this branch only three times
+        // Possible solutions:
+        //   1. Invert a random channel
+        //   2. Silence one channel and double the magnitude of the other
+        //   3. 90-degree shift both channels to one of the other quadrants randomly (current iteration)
+        //      i.e. if left is (+, +) and right is (-, -), randomly choose between (+, -) and (-, +)
+        //      left = right = Complex::new(-left.im, left.re) or Complex::new(-right.im, right.re) (corresponds to multiplying by i)
+        if rng.random() {
+            let diagonal = Complex::new(-original_left.im, original_left.re);
+            *original_left = diagonal;
+            *original_right = diagonal;
+        } else {
+            let diagonal = Complex::new(-original_right.im, original_right.re);
+            *original_left = diagonal;
+            *original_right = diagonal;
+        }
     }
 }
 

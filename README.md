@@ -26,19 +26,20 @@ __Known problems I can't seem to fix__:
     * .mp3 file output is longer than it should
 * FFT alignment algorithm introduces clicks/distortion/zipper noise in certian audio
   * Main test song: SOPHIE - "JUST LIKE WE NEVER SAID GOODBYE"
-    * Disconinuity at the start and end of some sections of audio
+    * Disconinuity at the start and end of some sections of audio (particularly near 16.93 seconds)
     * Bass between channels might just be highly uncorrelated?
-  * Likely caused by short-time Fourier transform (STFT)
-    * FFT itself is working correctly
-    * Window is working correctly
-    * Chunks/hopping seems to be working correctly
-    * Click loudness mainly affected by FFT length and number of FFT overlaps
-      * Partially affected by window choice, but that seems more like a spectral leakage problem
-      * Click loudness also mitigated through improved alignment algorithm
-    * Possible substitute: full-song FFTs
-      * Issues: needs too many overlaps to reduce, but not eliminate, frequency smearing; needs a decent amount of memory
-    * Possible substitute: complex wavelet instead of STFT
-      * Issues: no known implementation of the inverse (discrete or continuous) complex wavelet transform in Rust
+    * Seems to be the only song with this problem?
+  * Likely caused by short-time Fourier transform (STFT)?
+    * Click loudness seems to be affected by:
+      * FFT length
+      * Number of FFT overlaps
+      * Window choice, but that seems more like a spectral leakage problem
+      * Alignment algorithm
+    * Possible substitutes:
+      * Full-song FFTs
+        * Needs too many overlaps to reduce, but not eliminate, frequency smearing; needs a decent amount of memory
+      * Complex wavelet instead of STFT
+        * No known implementation of the inverse complex wavelet transform in Rust
 * FFT introduces relatively minor frequency smearing / pre-echo
   * Mainly affects very short hi-hats and sounds delayed in one channel
 
@@ -59,5 +60,6 @@ __Things to do__:
 * Add more error-checking
   * e.g. Vec memory allocation on 32-bit targets for long files (12-hours of audio)
     * could just suggest cutting down the audio into smaller bits
+* Make functions generic over floats (allow `f32` or `f64` in case more precision is needed)
 
 ![flamegraph](flamegraph.svg)
