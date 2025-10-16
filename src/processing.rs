@@ -38,9 +38,9 @@ pub fn process_samples(
 ) -> (Vec<f32>, Vec<f32>) {
     let mut left_channel = data.0;
     let mut right_channel = data.1;
-    let left_rms = gated_rms(&left_channel, sample_rate);
-    let right_rms = gated_rms(&right_channel, sample_rate);
-    let mean_rms = f64::sqrt(left_rms * right_rms);
+    let true_left_rms = gated_rms(&left_channel, sample_rate);
+    let true_right_rms = gated_rms(&right_channel, sample_rate);
+    let true_mean_rms = f64::sqrt(true_left_rms * true_right_rms);
 
     // Remove DC before processing
     // DC might affect magnitude of N Hz and interpolated values close to it
@@ -48,8 +48,25 @@ pub fn process_samples(
 
     // Average out RMS of left and right channels before processing
     // Might help in phase conflicts
-    let left_mult = (mean_rms / left_rms) as f32;
-    let right_mult = (mean_rms / right_rms) as f32;
+    // Using plain RMS since human hearing doesn't matter here
+    let length_recip = (left_channel.len() as f64).recip();
+    let plain_left_rms = f64::sqrt(
+        left_channel
+            .iter()
+            .map(|samp| f64::from(*samp).powi(2))
+            .sum::<f64>()
+            * length_recip,
+    );
+    let plain_right_rms = f64::sqrt(
+        right_channel
+            .iter()
+            .map(|samp| f64::from(*samp).powi(2))
+            .sum::<f64>()
+            * length_recip,
+    );
+    let plain_mean_rms = f64::sqrt(plain_left_rms * plain_right_rms);
+    let left_mult = (plain_mean_rms / plain_left_rms) as f32;
+    let right_mult = (plain_mean_rms / plain_right_rms) as f32;
     izip!(left_channel.iter_mut(), right_channel.iter_mut()).for_each(|(left_samp, right_samp)| {
         *left_samp *= left_mult;
         *right_samp *= right_mult;
@@ -65,11 +82,10 @@ pub fn process_samples(
     remove_dc(&mut processed_left, &mut processed_right);
 
     // Average out the loudness of the left and right channels
-    // Need to .sqrt() the RMS to get the per-sample multiplier instead of the per-RMS multiplier
     let processed_left_rms = gated_rms(&processed_left, sample_rate);
     let processed_right_rms = gated_rms(&processed_right, sample_rate);
-    let processed_left_mult = (mean_rms / processed_left_rms) as f32;
-    let processed_right_mult = (mean_rms / processed_right_rms) as f32;
+    let processed_left_mult = (true_mean_rms / processed_left_rms) as f32;
+    let processed_right_mult = (true_mean_rms / processed_right_rms) as f32;
     izip!(processed_left.iter_mut(), processed_right.iter_mut()).for_each(
         |(left_samp, right_samp)| {
             *left_samp *= processed_left_mult;

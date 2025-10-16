@@ -34,12 +34,13 @@ where
 }
 
 /// Aligns the phase angle of the left and right channels
-/// The original algorithm made each channel a scaled verison of `sum`. However, it is very sensitive
-///   around where the sum is near zero
-/// This new algorithm adds the original channel to the sum, so processing out-of-phase components might result in
-///   silencing one channel and doubling the magnitude of the other.
-/// Higher weight towards higher magnitude, so the channel with the higher magnitude doesn't rotate much,
-///   while the smaller magnitude channel may rotate a lot
+/// Generally speaking, it seems that I want the maximum phase shift to be 90 degrees per channel.
+/// The original algorithm made each channel a scaled verison of `sum` so the phase angles were correct. If `sum` was
+///   near zero, then it could lead to near-180-degree flips on one channel
+/// The current algorithm iterably averages the channel and the scaled `sum`, so instead of being flipped,
+///   the quieter out-of-phase channel would be made silent and the other would be increased to make up for it. However,
+///   this leads to a semi-correlated sound instead of fully-correlated sound like the original algorithm.
+/// Currently being researched on how to smoothly saturate to 90 degrees per channel
 #[expect(
     clippy::arithmetic_side_effects,
     reason = "clippy thinks the operations done on Complex<f32> are for integers"
