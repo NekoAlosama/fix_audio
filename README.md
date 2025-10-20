@@ -37,6 +37,8 @@ __Known problems I can't seem to fix__:
       * Window choice, but that seems more like a spectral leakage problem
       * Alignment algorithm
     * Possible substitutes:
+      * Lots of STFT overlapping
+        * Proven to work, just takes a lot of processing time
       * Full-song FFTs
         * Needs too many overlaps to reduce, but not eliminate, frequency smearing; needs a decent amount of memory
       * Complex wavelet instead of STFT

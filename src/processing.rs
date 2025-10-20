@@ -20,7 +20,7 @@ fn gated_rms(samples: &[f32], sample_rate: u32) -> f64 {
 
 /// Static DC removal
 fn remove_dc(channel_1: &mut [f32], channel_2: &mut [f32]) {
-    let length_recip = (channel_1.len() as f64).recip() as f32;
+    let length_recip = (1.0_f64 / channel_1.len() as f64) as f32;
     let first_dc = channel_1.iter().sum::<f32>() * length_recip;
     let second_dc = channel_2.iter().sum::<f32>() * length_recip;
     izip!(channel_1.iter_mut(), channel_2.iter_mut()).for_each(|(first, second)| {
@@ -38,31 +38,29 @@ pub fn process_samples(
 ) -> (Vec<f32>, Vec<f32>) {
     let mut left_channel = data.0;
     let mut right_channel = data.1;
-    let true_left_rms = gated_rms(&left_channel, sample_rate);
-    let true_right_rms = gated_rms(&right_channel, sample_rate);
-    let true_mean_rms = f64::sqrt(true_left_rms * true_right_rms);
 
     // Remove DC before processing
     // DC might affect magnitude of N Hz and interpolated values close to it
     remove_dc(&mut left_channel, &mut right_channel);
 
-    // Average out RMS of left and right channels before processing
+    // Integrated Loudness shouldn't be affected by DC noise, but this is placed here just in case
+    let true_left_rms = gated_rms(&left_channel, sample_rate);
+    let true_right_rms = gated_rms(&right_channel, sample_rate);
+    let true_mean_rms = f64::sqrt(true_left_rms * true_right_rms);
+
+    // Average out plain RMS of left and right channels before processing
     // Might help in phase conflicts
-    // Using plain RMS since human hearing doesn't matter here
-    let length_recip = (left_channel.len() as f64).recip();
+    // Human hearing doesn't matter here
+    let length_recip = 1.0_f64 / left_channel.len() as f64;
     let plain_left_rms = f64::sqrt(
-        left_channel
-            .iter()
-            .map(|samp| f64::from(*samp).powi(2))
-            .sum::<f64>()
-            * length_recip,
+        left_channel.iter().fold(0.0_f64, |acc, samp| {
+            f64::from(*samp).mul_add(f64::from(*samp), acc)
+        }) * length_recip,
     );
     let plain_right_rms = f64::sqrt(
-        right_channel
-            .iter()
-            .map(|samp| f64::from(*samp).powi(2))
-            .sum::<f64>()
-            * length_recip,
+        right_channel.iter().fold(0.0_f64, |acc, samp| {
+            f64::from(*samp).mul_add(f64::from(*samp), acc)
+        }) * length_recip,
     );
     let plain_mean_rms = f64::sqrt(plain_left_rms * plain_right_rms);
     let left_mult = (plain_mean_rms / plain_left_rms) as f32;

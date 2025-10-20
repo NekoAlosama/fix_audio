@@ -1,10 +1,26 @@
 use core::f64::consts::TAU;
 use itertools::izip;
 use rand::{Rng as _, rngs::ThreadRng};
-use realfft::{
-    RealFftPlanner,
-    num_complex::{Complex, ComplexFloat},
-};
+use realfft::{RealFftPlanner, num_complex::Complex};
+
+/// List of cosine coefficients of window function
+// https://holometer.fnal.gov/GH_FFT.pdf
+// Processing time can be reduced using an HFTxx(D) window with less coefficients
+// Currently using D.3.4 HFT116D, good enough to capture all 19.4-bit-or-less audio
+// Might be worth experimenting with the HFT70, HFT95, or HFT90D since spectral leakage might not be noticed here
+// (Internal multiplier, external multiplier)
+const WINDOW_COSINES: [(f64, f64); 5] = [
+    (TAU, -1.957_537_5_f64),
+    (2.0 * TAU, 1.478_070_5_f64),
+    (3.0 * TAU, -0.636_743_1_f64),
+    (4.0 * TAU, 0.122_838_9_f64),
+    (5.0 * TAU, -0.006_628_8_f64),
+];
+
+/// Faster `.norm_sqr()` that uses `mul_add`
+fn norm_squared(complex: Complex<f32>) -> f32 {
+    f32::mul_add(complex.re, complex.re, complex.im * complex.im)
+}
 
 /// Helper function that returns each channel added with the sum of them, scaled to the channel's magnitude.
 /// This basically halves the maximum phase difference between the channels, so one pass makes a 180-degree difference to a 90-degree difference, thus
@@ -14,22 +30,20 @@ use realfft::{
     clippy::arithmetic_side_effects,
     reason = "clippy thinks the operations done on Complex<f32> are for integers"
 )]
-#[expect(
-    clippy::inline_always,
-    reason = "benchmarked, more consistent performance with inlining"
-)]
-#[inline(always)]
-fn align_helper<T>(left: Complex<T>, right: Complex<T>) -> (Complex<T>, Complex<T>)
-where
-    T: ComplexFloat,
-{
-    let left_norm = left.norm_sqr().sqrt();
-    let right_norm = right.norm_sqr().sqrt();
+fn align_helper(left: Complex<f32>, right: Complex<f32>) -> (Complex<f32>, Complex<f32>) {
+    let left_norm = norm_squared(left).sqrt();
+    let right_norm = norm_squared(right).sqrt();
     let sum = left + right;
-    let normalized_sum = sum / sum.norm_sqr().sqrt();
+    let normalized_sum = sum / norm_squared(sum).sqrt();
     (
-        left + normalized_sum.scale(left_norm),
-        right + normalized_sum.scale(right_norm),
+        Complex::new(
+            normalized_sum.re.mul_add(left_norm, left.re),
+            normalized_sum.im.mul_add(left_norm, left.im),
+        ),
+        Complex::new(
+            normalized_sum.re.mul_add(right_norm, right.re),
+            normalized_sum.im.mul_add(right_norm, right.im),
+        ),
     )
 }
 
@@ -45,35 +59,29 @@ where
     clippy::arithmetic_side_effects,
     reason = "clippy thinks the operations done on Complex<f32> are for integers"
 )]
-#[expect(
-    clippy::inline_always,
-    reason = "benchmarked, more consistent performance with inlining"
-)]
-#[inline(always)]
 fn align(rng: &mut ThreadRng, original_left: &mut Complex<f32>, original_right: &mut Complex<f32>) {
-    // If one channel is basically zero, then we can just keep it and exit early
-    // Note that the compiler optimizes the OR statement here
     if original_left.l1_norm() <= f32::EPSILON || original_right.l1_norm() <= f32::EPSILON {
+        // If one channel is near zero, the channels are already aligned
+        // Note that the compiler optimizes the OR statement here
         return;
     }
 
-    // .norm_sqr().sqrt() is used over .hypot() for efficiency
+    // norm_sqared(&).sqrt() is used over .hypot() for efficiency
     // Clicks still present unfortunately
-    let left_norm = original_left.norm_sqr().sqrt();
-    let right_norm = original_right.norm_sqr().sqrt();
+    let left_norm = norm_squared(*original_left).sqrt();
+    let right_norm = norm_squared(*original_right).sqrt();
     let target_mag = left_norm + right_norm;
     let sum = *original_left + *original_right;
-    let normalized_sum = sum / sum.norm_sqr().sqrt();
+    let normalized_sum = sum / norm_squared(sum).sqrt();
 
     let (mut modified_left, mut modified_right) = align_helper(*original_left, *original_right); // max 90 degrees and 3.92dB error
     (modified_left, modified_right) = align_helper(modified_left, modified_right); // max 45 degrees and 0.91dB error
     (modified_left, modified_right) = align_helper(modified_left, modified_right); // max 22.5 degrees and 0.22dB error
     (modified_left, modified_right) = align_helper(modified_left, modified_right); // max 11.25 degrees and 0.06dB error
 
-    let modified_left_norm = modified_left.norm_sqr().sqrt();
-    let modified_right_norm = modified_right.norm_sqr().sqrt();
-    let target_mult = target_mag / (modified_left_norm + modified_right_norm);
-    let target_sum = normalized_sum * target_mult;
+    let modified_left_norm = norm_squared(modified_left).sqrt();
+    let modified_right_norm = norm_squared(modified_right).sqrt();
+    let target_sum = normalized_sum * target_mag / (modified_left_norm + modified_right_norm);
     let true_modifed_left = target_sum * modified_left_norm; // Channels are now aligned, so we have idempotence
     let true_modifed_right = target_sum * modified_right_norm;
 
@@ -91,45 +99,30 @@ fn align(rng: &mut ThreadRng, original_left: &mut Complex<f32>, original_right: 
         //   3. 90-degree shift both channels to one of the other quadrants randomly (current iteration)
         //      i.e. if left is (+, +) and right is (-, -), randomly choose between (+, -) and (-, +)
         //      left = right = Complex::new(-left.im, left.re) or Complex::new(-right.im, right.re) (corresponds to multiplying by i)
-        if rng.random() {
-            let diagonal = Complex::new(-original_left.im, original_left.re);
-            *original_left = diagonal;
-            *original_right = diagonal;
+        let diagonal = if rng.random() {
+            Complex::new(-original_left.im, original_left.re)
         } else {
-            let diagonal = Complex::new(-original_right.im, original_right.re);
-            *original_left = diagonal;
-            *original_right = diagonal;
-        }
+            Complex::new(-original_right.im, original_right.re)
+        };
+        *original_left = diagonal;
+        *original_right = diagonal;
     }
 }
 
 /// Windowing is used to make the signal chunk fade in and out
 ///   to prevent discontinuities, which causes spectral leakage (noise tuned to the music).
 fn window(time_frame: usize) -> Box<[f32]> {
-    let f64_rate_recip = (time_frame as f64).recip();
+    let f64_rate_recip = 1.0_f64 / (time_frame as f64);
     // The actual level of the window doesn't really matter
     // Window selection: minimize side-lobe level, ignore bandwidth of main lobe?
     (0..time_frame)
         .map(|n| {
-            // 6-term (5 cosines and 1 constant) HFT116D window,
-            //   flat top window with -116.8dB max leakage, but is pretty wide
-            // https://holometer.fnal.gov/GH_FFT.pdf
-
-            // List of coefficients, where the first term is the constant (multiplier * cos(0) == multiplier)
-            [
-                1.0_f64,
-                -1.957_537_5_f64,
-                1.478_070_5_f64,
-                -0.636_743_1_f64,
-                0.122_838_9_f64,
-                -0.006_628_8_f64,
-            ]
-            .iter()
-            .enumerate()
-            .map(|(index, multiplier)| {
-                multiplier * f64::cos(index as f64 * TAU * n as f64 * f64_rate_recip)
-            })
-            .sum::<f64>() as f32
+            WINDOW_COSINES
+                .iter()
+                .copied()
+                .fold(1.0_f64, |acc, (internal, external)| {
+                    external.mul_add(f64::cos(internal * n as f64 * f64_rate_recip), acc)
+                }) as f32
         })
         .collect()
 }
@@ -151,7 +144,7 @@ pub fn overlapping_fft(
 
     // Lots of Vecs are used here to reuse memory space instead of reallocating
     let fft_size = rounded_time_frame.next_power_of_two();
-    let fft_norm = (fft_size as f64).recip() as f32;
+    let fft_norm = (1.0_f64 / fft_size as f64) as f32;
     let r2c = planner.plan_fft_forward(fft_size);
     let c2r = planner.plan_fft_inverse(fft_size);
     let mut left_chunk = Vec::with_capacity(fft_size);
@@ -176,9 +169,9 @@ pub fn overlapping_fft(
 
     let window = window(rounded_time_frame);
 
-    // Window has 6 terms (5 cosine and 1 constant), so we need to add at least 6 shifted chunks to get a constant output level
-    // doing more chunks will help with clicking/zipper noise, but will of course increase runtime
-    let hop_time_frame = 1.0_f64 / 6.0_f64;
+    // Windows need a bunch of hops
+    // Doing more chunks will help with clicking/zipper noise, but will increase runtime
+    let hop_time_frame = 1.0_f64 / (WINDOW_COSINES.len() as f64 + 1.0_f64);
     let hop_size = (time_frame * hop_time_frame).round_ties_even() as usize;
 
     // Up until the end, which should be basically a half-window
@@ -211,12 +204,13 @@ pub fn overlapping_fft(
 
         // .skip(1) is needed to ignore the DC bin, which is the average vertical offset
         // It shouldn't be changed in case the vertical offset is actually just a very low frequency
-        // TODO: unsure if skipping DC actually does anything in practice
-        izip!(left_complex.iter_mut(), right_complex.iter_mut())
-            .skip(1)
-            .for_each(|(left_point, right_point)| {
+        // TODO: unsure if skipping DC actually does anything in practice,
+        //       further complicated by the fact that the window might spread the DC to bins 1, 2, etc.
+        izip!(left_complex.iter_mut(), right_complex.iter_mut()).for_each(
+            |(left_point, right_point)| {
                 align(rng, left_point, right_point);
-            });
+            },
+        );
 
         // left_chunk and right_chunk will be overwritten
         _ = c2r.process_with_scratch(&mut left_complex, &mut left_chunk, &mut scratch_real);
