@@ -14,7 +14,9 @@ Currently, this program takes in stereo audio files (input folder created on fir
     * Uses the EBU R 128 Integrated Loudness, while RX 11 uses plain RMS
     * Plain RMS is affected by DC bias and does not account for human hearing
 * Add DC noise to reduce peak levels
-  * Currently being used to test where and when DC noise is noticable. If so, this will be replaced with a DC removal step
+  * Currently being used to test where and when DC noise is noticable.
+    * An actual DC removal step is used to improve the above two processes
+    * If this step causes problems, it will be replaced with the DC removal step
   * Use case: Reduce peak levels while keeping the same loudness
 
 Processed audio files are sent to the output folder as 32-bit floating-point .wav files. Non-audio files (covers, documents, etc.) are transfered to the output folder. The original audio files are kept in the input folder, so remember to delete them if you don't need to re-run the program with changes.
@@ -49,20 +51,20 @@ __Known problems I can't seem to fix__:
 __Things to do__:
 * Copy tags from input to output
   * Best library seems to be `lofty-rs`
-* Add support for mono files
-  * Force upmixing to stereo?
-  * Make sure to bypass phase alignment
-* Make code more idiomatic
-  * Handle all existing `.unwrap()`s and `.expect()`s
 * Increase program efficiency
   * The current memory usage is good, so the main feature to implement is multithreading
   * Main bottlenecks also seem to be Sympohonia decoding (I/O reading) and hound .wav file-saving (I/O writing)
     * Parallelism via `rayon` doesn't seem to improve times
   * Another improvement would be to set the program's priority class (Idle -> Above Normal) and I/O priority (Normal -> High)
     * Approximate 50% speedup (90s to 60s on an old test suite) using System Informer to apply priorities
+* Add support for mono files
+  * Force upmixing to stereo?
+  * Make sure to bypass phase alignment
 * Add more error-checking
-  * e.g. Vec memory allocation on 32-bit targets for long files (12-hours of audio)
-    * could just suggest cutting down the audio into smaller bits
+  * Handle all existing `.unwrap()`s and `.expect()`s
+  * Vec memory allocation on 32-bit builds for long files of audio
+    * Could just suggest cutting down the audio into smaller bits
+  * Files shorter than FFT (sound effects?)
 * Make functions generic over floats (allow `f32` or `f64` in case more precision is needed)
 
 ![flamegraph](flamegraph.svg)

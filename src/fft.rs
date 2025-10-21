@@ -66,7 +66,8 @@ fn align(rng: &mut ThreadRng, original_left: &mut Complex<f32>, original_right: 
         return;
     }
 
-    // norm_sqared(&).sqrt() is used over .hypot() for efficiency
+    // norm_squared().sqrt() is used over .hypot() for efficiency
+    // TODO: maybe combine norm_squared().sqrt()? We never need norm_squared() by itself
     // Clicks still present unfortunately
     let left_norm = norm_squared(*original_left).sqrt();
     let right_norm = norm_squared(*original_right).sqrt();
@@ -202,10 +203,9 @@ pub fn overlapping_fft(
         _ = r2c.process_with_scratch(&mut left_chunk, &mut left_complex, &mut scratch_complex);
         _ = r2c.process_with_scratch(&mut right_chunk, &mut right_complex, &mut scratch_complex);
 
-        // .skip(1) is needed to ignore the DC bin, which is the average vertical offset
-        // It shouldn't be changed in case the vertical offset is actually just a very low frequency
-        // TODO: unsure if skipping DC actually does anything in practice,
-        //       further complicated by the fact that the window might spread the DC to bins 1, 2, etc.
+        // Since DC bias is removed, the DC/first/zeroth bin should be near zero and
+        //   it should be fine to manipulate it
+        // Even if it isn't near zero, the value probably spread out to the other bins anyway
         izip!(left_complex.iter_mut(), right_complex.iter_mut()).for_each(
             |(left_point, right_point)| {
                 align(rng, left_point, right_point);
@@ -224,7 +224,7 @@ pub fn overlapping_fft(
 
         #[expect(
             clippy::iter_with_drain,
-            reason = "nursery lint, .drain(..) is needed to clear the vec"
+            reason = "nursery lint, .drain(..) is needed to clear the chunk vecs"
         )]
         izip!(
             holding_left.iter_mut().skip(holding_position),
