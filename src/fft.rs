@@ -21,13 +21,13 @@ fn norm_squared(complex: Complex<f64>) -> f64 {
     f64::mul_add(complex.re, complex.re, complex.im * complex.im)
 }
 
+/// Faster `.is_finite()` that skips NaN check in `num_traits::FloatCore`
+fn is_finite(complex: Complex<f64>) -> bool {
+    complex.re.abs() < f64::INFINITY && complex.im.abs() < f64::INFINITY
+}
+
 /// Aligns the phase angle of the left and right channels
-/// Generally speaking, it seems that I want the maximum phase shift to be 90 degrees per channel.
-/// This algorithm made each channel a scaled verison of `sum` so the phase angles were correct. If `sum` was
-///   near zero, then it could lead to near-180-degree flips on one channel
-/// Currently being researched on how to smoothly saturate to 90 degrees per channel
-///   Previous experimental algorithm modified the amplitude of the channels, approximating this algorithm if
-///   the channels were at least somewhat in-phase, but attenuated one channel to silence and increased the other if out-of-phase
+/// Clicks still present unfortunately
 #[expect(
     clippy::arithmetic_side_effects,
     reason = "clippy thinks the operations done on Complex<f64> are for integers"
@@ -35,28 +35,29 @@ fn norm_squared(complex: Complex<f64>) -> f64 {
 fn align(original_left: &mut Complex<f64>, original_right: &mut Complex<f64>) {
     // norm_squared().sqrt() is used over .hypot() for efficiency
     // TODO: maybe combine norm_squared().sqrt()? We never need norm_squared() by itself
-    // Clicks still present unfortunately
     let left_norm = norm_squared(*original_left).sqrt();
     let right_norm = norm_squared(*original_right).sqrt();
-    let sum = *original_left + *original_right;
-    let normalized_sum = sum / norm_squared(sum).sqrt();
 
-    let true_modifed_left = left_norm * normalized_sum;
-    let true_modifed_right = right_norm * normalized_sum;
-
-    if true_modifed_left.is_finite() && true_modifed_right.is_finite() {
-        // Ideally, any NaNs and Inf's should be caught by the above
-        *original_left = true_modifed_left;
-        *original_right = true_modifed_right;
+    let mut sum = *original_left / left_norm + *original_right / right_norm; // Average angle
+    let mut normalized_sum = sum / norm_squared(sum).sqrt();
+    if is_finite(normalized_sum) {
+        *original_left = left_norm * normalized_sum;
+        *original_right = right_norm * normalized_sum;
     } else {
-        // This case occurs when the `sum` is near zero, i.e. `left` approximately equals `-right`
-        // The best solutions seem to be just replicating the near-zero behavior, as in:
-        //   1. Copy left channel to right channel (if using simple algorithm)
-        //      Just to be consistent: copying the right channel to the left should be equivalent sonically
-        //      Should be mostly equivalent to inverting the right channel, but should be faster that inverting?
-        //   2. Randomly silence one channel and double the magnitude of the other (if using experimental algorithm)
-        //      It'd suck to just silence the left channel and double the right all the time
-        *original_right = *original_left;
+        // If normalized_sum has NaNs or Inf's, that means that the channels were out-of-phase
+        // However, one channel might still be louder than the other, so this algorithm adjusts for that
+        sum = *original_left + *original_right; // Circular mean, or weighted average angle
+        normalized_sum = sum / norm_squared(sum).sqrt();
+
+        if is_finite(normalized_sum) {
+            *original_left = left_norm * normalized_sum;
+            *original_right = right_norm * normalized_sum;
+        } else {
+            // If normalized_sum has NaNs or Inf's, that means that the channels were exactly out-of-phase, or
+            //   `*original_left` approximately equals `-*original_right`
+            // To avoid NaNs/Inf's and be consistent, we just copy the left channel to the right channel to align them
+            *original_right = *original_left;
+        }
     }
 }
 

@@ -15,8 +15,9 @@ Currently, this program takes in stereo audio files (input folder created on fir
     * Plain RMS is affected by DC bias and does not account for human hearing
 * Add DC noise to reduce peak levels
   * Currently being used to test where and when DC noise is noticable.
+    * DC may be removed when encoding to a lossy codec
     * An actual DC removal step is used to improve the above two processes
-    * If this step causes problems, it will be replaced with the DC removal step
+    * If this step causes problems, it will be removed and this section will advertise the DC removal step
   * Use case: Reduce peak levels while keeping the same loudness
 
 Processed audio files are sent to the output folder as 32-bit floating-point .wav files. Non-audio files (covers, documents, etc.) are transfered to the output folder. The original audio files are kept in the input folder, so remember to delete them if you don't need to re-run the program with changes.
