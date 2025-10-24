@@ -11,7 +11,7 @@ use symphonia::{
 };
 
 /// Seperated here due to Clippy lint
-type AudioMatrix = ((Vec<f32>, Vec<f32>), u32);
+type AudioMatrix = ((Vec<f64>, Vec<f64>), u32);
 /// Get samples and metadata for a given file using `Symphonia`
 pub fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Error> {
     // Based on `Symphonia`'s docs.rs page and example code (mix of 0.5.4 and dev-0.6)
@@ -50,10 +50,10 @@ pub fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Err
 
     let track_id = track.id;
 
-    let mut left_samples: Vec<f32> = vec![];
-    let mut right_samples: Vec<f32> = vec![];
+    let mut left_samples: Vec<f64> = vec![];
+    let mut right_samples: Vec<f64> = vec![];
 
-    let mut sample_buf: Vec<f32> = vec![];
+    let mut sample_buf: Vec<f64> = vec![];
     let mut sample_rate = 0;
 
     // 9
@@ -67,7 +67,7 @@ pub fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Err
                         sample_rate = audio_buf.spec().rate();
                     }
                     // The API for planar samples sucks
-                    sample_buf.resize(audio_buf.samples_interleaved(), 0.0);
+                    sample_buf.resize(audio_buf.samples_interleaved(), 0.0_f64);
                     audio_buf.copy_to_slice_interleaved(&mut sample_buf);
                     sample_buf.chunks_exact(2).for_each(|chunk| {
                         // SAFETY: chunk.len() > 1

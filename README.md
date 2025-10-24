@@ -28,6 +28,8 @@ __Known problems I can't seem to fix__:
     * .opus files or video files containing audio in general
     * .mp3 file output is longer than it should
 * FFT alignment algorithm introduces clicks/distortion/zipper noise in certian audio
+  * If click was already present, alignment algorithm may amplify it if the click was out-of-phase between channels
+    * Not desired behavior since it'll just increase peak level
   * Main test song: SOPHIE - "JUST LIKE WE NEVER SAID GOODBYE"
     * Disconinuity at the start and end of some sections of audio (particularly near 16.93 seconds)
     * Bass between channels might just be highly uncorrelated?
@@ -52,7 +54,7 @@ __Things to do__:
 * Copy tags from input to output
   * Best library seems to be `lofty-rs`
 * Increase program efficiency
-  * The current memory usage is good, so the main feature to implement is multithreading
+  * The current memory usage is good(?; could be different now since we're using `f64`), so the main feature to implement is multithreading
   * Main bottlenecks also seem to be Sympohonia decoding (I/O reading) and hound .wav file-saving (I/O writing)
     * Parallelism via `rayon` doesn't seem to improve times
   * Another improvement would be to set the program's priority class (Idle -> Above Normal) and I/O priority (Normal -> High)
@@ -66,5 +68,6 @@ __Things to do__:
     * Could just suggest cutting down the audio into smaller bits
   * Files shorter than FFT (sound effects?)
 * Make functions generic over floats (allow `f32` or `f64` in case more precision is needed)
+  * Considering using `f64` over `f32` always to ensure no quantization noise/errors
 
 ![flamegraph](flamegraph.svg)

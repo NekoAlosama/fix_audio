@@ -1,6 +1,5 @@
 use core::f64::consts::TAU;
 use itertools::izip;
-use rand::{Rng as _, rngs::ThreadRng};
 use realfft::{RealFftPlanner, num_complex::Complex};
 
 /// List of cosine coefficients of window function
@@ -18,101 +17,52 @@ const WINDOW_COSINES: [(f64, f64); 5] = [
 ];
 
 /// Faster `.norm_sqr()` that uses `mul_add`
-fn norm_squared(complex: Complex<f32>) -> f32 {
-    f32::mul_add(complex.re, complex.re, complex.im * complex.im)
-}
-
-/// Helper function that returns each channel added with the sum of them, scaled to the channel's magnitude.
-/// This basically halves the maximum phase difference between the channels, so one pass makes a 180-degree difference to a 90-degree difference, thus
-///   out-of-phase components just become uncorrelated components (silence in one channel and sound in the other)
-/// The magnitudes are modified to something not worth calculating, so we'll normalize it later
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "clippy thinks the operations done on Complex<f32> are for integers"
-)]
-fn align_helper(left: Complex<f32>, right: Complex<f32>) -> (Complex<f32>, Complex<f32>) {
-    let left_norm = norm_squared(left).sqrt();
-    let right_norm = norm_squared(right).sqrt();
-    let sum = left + right;
-    let normalized_sum = sum / norm_squared(sum).sqrt();
-    (
-        Complex::new(
-            normalized_sum.re.mul_add(left_norm, left.re),
-            normalized_sum.im.mul_add(left_norm, left.im),
-        ),
-        Complex::new(
-            normalized_sum.re.mul_add(right_norm, right.re),
-            normalized_sum.im.mul_add(right_norm, right.im),
-        ),
-    )
+fn norm_squared(complex: Complex<f64>) -> f64 {
+    f64::mul_add(complex.re, complex.re, complex.im * complex.im)
 }
 
 /// Aligns the phase angle of the left and right channels
 /// Generally speaking, it seems that I want the maximum phase shift to be 90 degrees per channel.
-/// The original algorithm made each channel a scaled verison of `sum` so the phase angles were correct. If `sum` was
+/// This algorithm made each channel a scaled verison of `sum` so the phase angles were correct. If `sum` was
 ///   near zero, then it could lead to near-180-degree flips on one channel
-/// The current algorithm iterably averages the channel and the scaled `sum`, so instead of being flipped,
-///   the quieter out-of-phase channel would be made silent and the other would be increased to make up for it. However,
-///   this leads to a semi-correlated sound instead of fully-correlated sound like the original algorithm.
 /// Currently being researched on how to smoothly saturate to 90 degrees per channel
+///   Previous experimental algorithm modified the amplitude of the channels, approximating this algorithm if
+///   the channels were at least somewhat in-phase, but attenuated one channel to silence and increased the other if out-of-phase
 #[expect(
     clippy::arithmetic_side_effects,
-    reason = "clippy thinks the operations done on Complex<f32> are for integers"
+    reason = "clippy thinks the operations done on Complex<f64> are for integers"
 )]
-fn align(rng: &mut ThreadRng, original_left: &mut Complex<f32>, original_right: &mut Complex<f32>) {
-    if original_left.l1_norm() <= f32::EPSILON || original_right.l1_norm() <= f32::EPSILON {
-        // If one channel is near zero, the channels are already aligned
-        // Note that the compiler optimizes the OR statement here
-        return;
-    }
-
+fn align(original_left: &mut Complex<f64>, original_right: &mut Complex<f64>) {
     // norm_squared().sqrt() is used over .hypot() for efficiency
     // TODO: maybe combine norm_squared().sqrt()? We never need norm_squared() by itself
     // Clicks still present unfortunately
     let left_norm = norm_squared(*original_left).sqrt();
     let right_norm = norm_squared(*original_right).sqrt();
-    let target_mag = left_norm + right_norm;
     let sum = *original_left + *original_right;
     let normalized_sum = sum / norm_squared(sum).sqrt();
 
-    let (mut modified_left, mut modified_right) = align_helper(*original_left, *original_right); // max 90 degrees and 3.92dB error
-    (modified_left, modified_right) = align_helper(modified_left, modified_right); // max 45 degrees and 0.91dB error
-    (modified_left, modified_right) = align_helper(modified_left, modified_right); // max 22.5 degrees and 0.22dB error
-    (modified_left, modified_right) = align_helper(modified_left, modified_right); // max 11.25 degrees and 0.06dB error
-
-    let modified_left_norm = norm_squared(modified_left).sqrt();
-    let modified_right_norm = norm_squared(modified_right).sqrt();
-    let target_sum = normalized_sum * target_mag / (modified_left_norm + modified_right_norm);
-    let true_modifed_left = target_sum * modified_left_norm; // Channels are now aligned, so we have idempotence
-    let true_modifed_right = target_sum * modified_right_norm;
+    let true_modifed_left = left_norm * normalized_sum;
+    let true_modifed_right = right_norm * normalized_sum;
 
     if true_modifed_left.is_finite() && true_modifed_right.is_finite() {
         // Ideally, any NaNs and Inf's should be caught by the above
         *original_left = true_modifed_left;
         *original_right = true_modifed_right;
     } else {
-        // There isn't really a good way to handle when `sum` is near zero
-        // This case seems to rarely occur anyways, so I probably shouldn't focus too much on it
-        //   ex: "JUST LIKE WE NEVER SAID GOODBYE" activates this branch only three times
-        // Possible solutions:
-        //   1. Invert a random channel
-        //   2. Silence one channel and double the magnitude of the other
-        //   3. 90-degree shift both channels to one of the other quadrants randomly (current iteration)
-        //      i.e. if left is (+, +) and right is (-, -), randomly choose between (+, -) and (-, +)
-        //      left = right = Complex::new(-left.im, left.re) or Complex::new(-right.im, right.re) (corresponds to multiplying by i)
-        let diagonal = if rng.random() {
-            Complex::new(-original_left.im, original_left.re)
-        } else {
-            Complex::new(-original_right.im, original_right.re)
-        };
-        *original_left = diagonal;
-        *original_right = diagonal;
+        // This case occurs when the `sum` is near zero, i.e. `left` approximately equals `-right`
+        // The best solutions seem to be just replicating the near-zero behavior, as in:
+        //   1. Copy left channel to right channel (if using simple algorithm)
+        //      Just to be consistent: copying the right channel to the left should be equivalent sonically
+        //      Should be mostly equivalent to inverting the right channel, but should be faster that inverting?
+        //   2. Randomly silence one channel and double the magnitude of the other (if using experimental algorithm)
+        //      It'd suck to just silence the left channel and double the right all the time
+        *original_right = *original_left;
     }
 }
 
 /// Windowing is used to make the signal chunk fade in and out
 ///   to prevent discontinuities, which causes spectral leakage (noise tuned to the music).
-fn window(time_frame: usize) -> Box<[f32]> {
+fn window(time_frame: usize) -> Box<[f64]> {
     let f64_rate_recip = 1.0_f64 / (time_frame as f64);
     // The actual level of the window doesn't really matter
     // Window selection: minimize side-lobe level, ignore bandwidth of main lobe?
@@ -123,19 +73,18 @@ fn window(time_frame: usize) -> Box<[f32]> {
                 .copied()
                 .fold(1.0_f64, |acc, (internal, external)| {
                     external.mul_add(f64::cos(internal * n as f64 * f64_rate_recip), acc)
-                }) as f32
+                })
         })
         .collect()
 }
 
 /// Specific overlapping
 pub fn overlapping_fft(
-    rng: &mut ThreadRng,
-    planner: &mut RealFftPlanner<f32>,
+    planner: &mut RealFftPlanner<f64>,
     time_frame: f64,
-    left_channel: Vec<f32>,
-    right_channel: Vec<f32>,
-) -> (Vec<f32>, Vec<f32>) {
+    left_channel: Vec<f64>,
+    right_channel: Vec<f64>,
+) -> (Vec<f64>, Vec<f64>) {
     let original_length = left_channel.len();
 
     // Idea is that time_frame gives us the amount of samples (possibly fractional) that we need to FFT
@@ -145,7 +94,7 @@ pub fn overlapping_fft(
 
     // Lots of Vecs are used here to reuse memory space instead of reallocating
     let fft_size = rounded_time_frame.next_power_of_two();
-    let fft_norm = (1.0_f64 / fft_size as f64) as f32;
+    let fft_norm = 1.0_f64 / fft_size as f64;
     let r2c = planner.plan_fft_forward(fft_size);
     let c2r = planner.plan_fft_inverse(fft_size);
     let mut left_chunk = Vec::with_capacity(fft_size);
@@ -156,16 +105,16 @@ pub fn overlapping_fft(
     let mut scratch_real = c2r.make_scratch_vec();
 
     // This consumes left_channel and right_channel
-    let mut extended_left = vec![0.0_f32; half_time_frame]; // Allow half-window at start
-    let mut extended_right = vec![0.0_f32; half_time_frame];
+    let mut extended_left = vec![0.0_f64; half_time_frame]; // Allow half-window at start
+    let mut extended_right = vec![0.0_f64; half_time_frame];
     extended_left.extend(left_channel);
     extended_right.extend(right_channel);
-    extended_left.extend(vec![0.0_f32; fft_size]); // Allow for last FFT chunk to be added
-    extended_right.extend(vec![0.0_f32; fft_size]);
+    extended_left.extend(vec![0.0_f64; fft_size]); // Allow for last FFT chunk to be added
+    extended_right.extend(vec![0.0_f64; fft_size]);
     let extended_length = extended_left.len();
 
-    let mut holding_left = vec![0.0_f32; extended_length];
-    let mut holding_right = vec![0.0_f32; extended_length];
+    let mut holding_left = vec![0.0_f64; extended_length];
+    let mut holding_right = vec![0.0_f64; extended_length];
     let mut holding_position = 0_usize;
 
     let window = window(rounded_time_frame);
@@ -197,8 +146,8 @@ pub fn overlapping_fft(
             },
         );
 
-        left_chunk.resize(fft_size, 0.0_f32);
-        right_chunk.resize(fft_size, 0.0_f32);
+        left_chunk.resize(fft_size, 0.0_f64);
+        right_chunk.resize(fft_size, 0.0_f64);
 
         _ = r2c.process_with_scratch(&mut left_chunk, &mut left_complex, &mut scratch_complex);
         _ = r2c.process_with_scratch(&mut right_chunk, &mut right_complex, &mut scratch_complex);
@@ -208,7 +157,7 @@ pub fn overlapping_fft(
         // Even if it isn't near zero, the value probably spread out to the other bins anyway
         izip!(left_complex.iter_mut(), right_complex.iter_mut()).for_each(
             |(left_point, right_point)| {
-                align(rng, left_point, right_point);
+                align(left_point, right_point);
             },
         );
 
@@ -240,10 +189,10 @@ pub fn overlapping_fft(
         holding_position = usize::strict_add(holding_position, hop_size);
     }
 
-    let f32_hop_time_frame = hop_time_frame as f32;
+    let f64_hop_time_frame = hop_time_frame;
     izip!(holding_left.iter_mut(), holding_right.iter_mut()).for_each(|(hold_left, hold_right)| {
-        *hold_left *= f32_hop_time_frame;
-        *hold_right *= f32_hop_time_frame;
+        *hold_left *= f64_hop_time_frame;
+        *hold_right *= f64_hop_time_frame;
     });
 
     (

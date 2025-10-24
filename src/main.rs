@@ -53,7 +53,6 @@ fn main() -> Result<(), Error> {
     // Keeping the time for benchmarking
     let time = time::Instant::now();
     let mut planner = RealFftPlanner::new();
-    let mut rng = rand::rng();
 
     // Check if INPUT_DIR exists, or create it if it doesn't
     match fs::exists(INPUT_DIR) {
@@ -78,7 +77,7 @@ fn main() -> Result<(), Error> {
         let mut output_path =
             path::PathBuf::from(OUTPUT_DIR).join(entry.strip_prefix(INPUT_DIR).unwrap());
 
-        let channels: (Vec<f32>, Vec<f32>);
+        let channels: (Vec<f64>, Vec<f64>);
         let sample_rate: u32;
         // If we can't properly decode the data, it's likely not audio data
         // In this case, we just send it to OUTPUT_DIR so it's not spitting the warning every run
@@ -108,7 +107,7 @@ fn main() -> Result<(), Error> {
 
         print!("    Processing... ");
         io::stdout().flush()?;
-        let modified_audio = process_samples(&mut rng, &mut planner, channels, sample_rate);
+        let modified_audio = process_samples(&mut planner, channels, sample_rate);
 
         print!("    Exporting...");
         io::stdout().flush()?;

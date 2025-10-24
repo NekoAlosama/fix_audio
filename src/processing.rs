@@ -2,7 +2,6 @@ use crate::fft;
 use core::f64::consts::PI;
 use ebur128::{EbuR128, Mode};
 use itertools::{Itertools as _, izip};
-use rand::rngs::ThreadRng;
 use realfft::RealFftPlanner;
 
 /// Force minimum reconstructed frequency to `MIN_FREQ` hertz
@@ -14,18 +13,18 @@ const MIN_FREQ: f64 = 16.0_f64;
 /// Basically a two-pass windowed RMS.
 ///   First pass is used to detect and ignore silence at -70dB
 ///   Second pass is used to detect and ignore audio that's 10dB below the first-pass result
-fn gated_rms(samples: &[f32], sample_rate: u32) -> f64 {
+fn gated_rms(samples: &[f64], sample_rate: u32) -> f64 {
     let mut ebur128 = EbuR128::new(1_u32, sample_rate, Mode::I).expect("Shouldn't happen");
-    // .add_frames_f32_planar() sucks since it requires an array of channel arrays, so for one channel, it needs an array around it
+    // .add_frames_f64_planar() sucks since it requires an array of channel arrays, so for one channel, it needs an array around it
     // f64 samples are not needed
-    _ = ebur128.add_frames_f32(samples);
+    _ = ebur128.add_frames_f64(samples);
     let loudness = ebur128.loudness_global().expect("Shouldn't happen");
 
     10.0_f64.powf(loudness * 0.05_f64)
 }
 
 /// Active DC removal
-fn remove_dc(sample_rate: u32, channel: &mut [f32]) {
+fn remove_dc(sample_rate: u32, channel: &mut [f64]) {
     let f64_sample_rate = f64::from(sample_rate);
 
     // Discrete-time high pass filter with `MIN_FREQ/2`hz as the corner frequency
@@ -34,21 +33,19 @@ fn remove_dc(sample_rate: u32, channel: &mut [f32]) {
     let mut previous_output = 0.0_f64;
     let mut previous_input = 0.0_f64;
     for input in channel.iter_mut() {
-        let f64_input = f64::from(*input);
-        let passed_output = alpha * (previous_output + f64_input - previous_input);
-        previous_input = f64_input;
+        let passed_output = alpha * (previous_output + *input - previous_input);
+        previous_input = *input;
         previous_output = passed_output;
-        *input = passed_output as f32;
+        *input = passed_output;
     }
 }
 
 /// All three processing steps into one function
 pub fn process_samples(
-    rng: &mut ThreadRng,
-    planner: &mut RealFftPlanner<f32>,
-    data: (Vec<f32>, Vec<f32>),
+    planner: &mut RealFftPlanner<f64>,
+    data: (Vec<f64>, Vec<f64>),
     sample_rate: u32,
-) -> (Vec<f32>, Vec<f32>) {
+) -> (Vec<f64>, Vec<f64>) {
     let mut left_channel = data.0;
     let mut right_channel = data.1;
 
@@ -67,18 +64,20 @@ pub fn process_samples(
     // Human hearing doesn't matter here
     let length_recip = 1.0_f64 / left_channel.len() as f64;
     let plain_left_rms = f64::sqrt(
-        left_channel.iter().fold(0.0_f64, |acc, samp| {
-            f64::from(*samp).mul_add(f64::from(*samp), acc)
-        }) * length_recip,
+        left_channel
+            .iter()
+            .fold(0.0_f64, |acc, samp| samp.mul_add(*samp, acc))
+            * length_recip,
     );
     let plain_right_rms = f64::sqrt(
-        right_channel.iter().fold(0.0_f64, |acc, samp| {
-            f64::from(*samp).mul_add(f64::from(*samp), acc)
-        }) * length_recip,
+        right_channel
+            .iter()
+            .fold(0.0_f64, |acc, samp| samp.mul_add(*samp, acc))
+            * length_recip,
     );
     let plain_mean_rms = f64::sqrt(plain_left_rms * plain_right_rms);
-    let left_mult = (plain_mean_rms / plain_left_rms) as f32;
-    let right_mult = (plain_mean_rms / plain_right_rms) as f32;
+    let left_mult = plain_mean_rms / plain_left_rms;
+    let right_mult = plain_mean_rms / plain_right_rms;
     izip!(left_channel.iter_mut(), right_channel.iter_mut()).for_each(|(left_samp, right_samp)| {
         *left_samp *= left_mult;
         *right_samp *= right_mult;
@@ -86,7 +85,7 @@ pub fn process_samples(
 
     let time_frame = f64::from(sample_rate) / MIN_FREQ; // actually in number of samples
     let (mut processed_left, mut processed_right) =
-        fft::overlapping_fft(rng, planner, time_frame, left_channel, right_channel);
+        fft::overlapping_fft(planner, time_frame, left_channel, right_channel);
 
     // Remove DC after processing
     remove_dc(sample_rate, &mut processed_left);
@@ -95,8 +94,8 @@ pub fn process_samples(
     // Average out the loudness of the left and right channels
     let processed_left_rms = gated_rms(&processed_left, sample_rate);
     let processed_right_rms = gated_rms(&processed_right, sample_rate);
-    let processed_left_mult = (true_mean_rms / processed_left_rms) as f32;
-    let processed_right_mult = (true_mean_rms / processed_right_rms) as f32;
+    let processed_left_mult = true_mean_rms / processed_left_rms;
+    let processed_right_mult = true_mean_rms / processed_right_rms;
     izip!(processed_left.iter_mut(), processed_right.iter_mut()).for_each(
         |(left_samp, right_samp)| {
             *left_samp *= processed_left_mult;
@@ -107,8 +106,8 @@ pub fn process_samples(
     // Add DC noise to reduce peak levels
     let (left_min, left_max) = processed_left.iter().minmax().into_option().unwrap();
     let (right_min, right_max) = processed_right.iter().minmax().into_option().unwrap();
-    let new_left_dc = f32::midpoint(*left_min, *left_max);
-    let new_right_dc = f32::midpoint(*right_min, *right_max);
+    let new_left_dc = f64::midpoint(*left_min, *left_max);
+    let new_right_dc = f64::midpoint(*right_min, *right_max);
     izip!(processed_left.iter_mut(), processed_right.iter_mut()).for_each(
         |(left_samp, right_samp)| {
             *left_samp -= new_left_dc;

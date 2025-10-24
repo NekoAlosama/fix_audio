@@ -3,7 +3,7 @@ use itertools::izip;
 use std::path::Path;
 
 /// Export processed audio to the output using `hound`
-pub fn export_audio(file_path: &Path, audio: &(Vec<f32>, Vec<f32>), sample_rate: u32) {
+pub fn export_audio(file_path: &Path, audio: &(Vec<f64>, Vec<f64>), sample_rate: u32) {
     // TODO: add simple functionality for mono signals?
     // Might be a lot of work for something you can re-render to stereo in foobar2000
     let spec = WavSpec {
@@ -15,8 +15,12 @@ pub fn export_audio(file_path: &Path, audio: &(Vec<f32>, Vec<f32>), sample_rate:
     let mut writer = WavWriter::create(file_path, spec).expect("Could not create writer");
 
     izip!(audio.0.iter(), audio.1.iter()).for_each(|(left, right)| {
-        writer.write_sample(*left).expect("Could not write sample");
-        writer.write_sample(*right).expect("Could not write sample");
+        writer
+            .write_sample(*left as f32)
+            .expect("Could not write sample");
+        writer
+            .write_sample(*right as f32)
+            .expect("Could not write sample");
     });
     writer.finalize().expect("Could not finalize WAV file");
 }
