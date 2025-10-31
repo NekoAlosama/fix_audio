@@ -38,16 +38,22 @@ fn align(original_left: &mut Complex<f64>, original_right: &mut Complex<f64>) {
     let left_norm = norm_squared(*original_left).sqrt();
     let right_norm = norm_squared(*original_right).sqrt();
 
-    let mut sum = *original_left / left_norm + *original_right / right_norm; // Average angle
-    let mut normalized_sum = sum / norm_squared(sum).sqrt();
+    let normal_sum = *original_left + *original_right; // Circular mean, or weighted average angle
+    let angle_sum = *original_left / left_norm + *original_right / right_norm; // Unweighted average angle
+
+    // This target_sum introduces fewer clicks compared to normal_sum or angle_sum by themselves
+    // TODO: understand why this happens and why it's not enough to eliminate clicks
+    // TODO: experiment with adding coefficients to normal_sum or angle_sum
+    let target_sum = normal_sum + angle_sum;
+    let mut normalized_sum = target_sum / norm_squared(target_sum).sqrt();
     if is_finite(normalized_sum) {
         *original_left = left_norm * normalized_sum;
         *original_right = right_norm * normalized_sum;
     } else {
-        // If normalized_sum has NaNs or Inf's, that means that the channels were out-of-phase
-        // However, one channel might still be louder than the other, so this algorithm adjusts for that
-        sum = *original_left + *original_right; // Circular mean, or weighted average angle
-        normalized_sum = sum / norm_squared(sum).sqrt();
+        // If normalized_sum has NaNs or Inf's, that means that left_norm, right_norm, or norm_squared(target_sum).sqrt() was near zero
+        // That could mean that one channel was silence or that the channels are exactly out-of-phase
+        // Since normal_sum can't produce NaNs by itself, we should try that if one channel was silence
+        normalized_sum = normal_sum / norm_squared(normal_sum).sqrt();
 
         if is_finite(normalized_sum) {
             *original_left = left_norm * normalized_sum;
@@ -94,7 +100,17 @@ pub fn overlapping_fft(
     let half_time_frame = (time_frame * 0.5_f64).round_ties_even() as usize;
 
     // Lots of Vecs are used here to reuse memory space instead of reallocating
-    let fft_size = rounded_time_frame.next_power_of_two();
+    // For fft_size specifically, there's different opinions online on how much zero-padding is needed
+    //   Here, at least 75% of the FFT will be added silence
+    //   e.g. 0 uses of .next_power_of_two() == 0% silence,
+    //        1 use of .next_power_of_two() == 0% up to 50% silence,
+    //        2 uses of .next_power_of_two() == 50% up to 75% silence,
+    //        3 uses of .next_power_of_two() == 75% up to 87.5% silence,
+    //        and so on...
+    let fft_size = rounded_time_frame
+        .next_power_of_two()
+        .next_power_of_two()
+        .next_power_of_two();
     let fft_norm = 1.0_f64 / fft_size as f64;
     let r2c = planner.plan_fft_forward(fft_size);
     let c2r = planner.plan_fft_inverse(fft_size);

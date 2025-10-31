@@ -51,7 +51,13 @@ pub fn process_samples(
 
     // Remove DC before processing
     // DC might affect magnitude of `MIN_FREQ` Hz and interpolated values close to it
+    // MIN_FREQ should be inaudible as is, so removing all audio at MIN_FREQ/2 or lower should be fine
+    // If you wanted bass down there, it'd be better to generate it yourself with another plugin
     remove_dc(sample_rate, &mut left_channel);
+    remove_dc(sample_rate, &mut left_channel);
+    remove_dc(sample_rate, &mut left_channel);
+    remove_dc(sample_rate, &mut right_channel);
+    remove_dc(sample_rate, &mut right_channel);
     remove_dc(sample_rate, &mut right_channel);
 
     // Integrated Loudness shouldn't be affected by DC noise, but this is placed after DC removal just in case
@@ -87,9 +93,8 @@ pub fn process_samples(
     let (mut processed_left, mut processed_right) =
         fft::overlapping_fft(planner, time_frame, left_channel, right_channel);
 
-    // Remove DC after processing
-    remove_dc(sample_rate, &mut processed_left);
-    remove_dc(sample_rate, &mut processed_right);
+    // STFT will generate sub-MIN_FREQ noise
+    // There isn't really a benefit to removing the noise now, and DC noise will be added later anyways
 
     // Average out the loudness of the left and right channels
     let processed_left_rms = gated_rms(&processed_left, sample_rate);
