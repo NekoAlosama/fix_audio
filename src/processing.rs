@@ -1,13 +1,16 @@
 use crate::fft;
-use core::f64::consts::PI;
 use ebur128::{EbuR128, Mode};
 use itertools::{Itertools as _, izip};
 use realfft::RealFftPlanner;
 
 /// Force minimum reconstructed frequency to `MIN_FREQ` hertz
-// 16hz is used since it's short enough to prevent smearing
-// Recommended range is 10hz to 20hz, inclusive
-const MIN_FREQ: f64 = 16.0_f64;
+/// Recommended range is 10hz to 20hz, inclusive
+/// Some audio equipment can output 10hz or less
+const MIN_FREQ: f64 = 16_f64;
+
+/// 10^(1/20), for `gated_rms()`
+/// `10_f64.powf(loudness * 0.05_f64)` == `LOUDNESS_BASE.powf(loudness)`
+const LOUDNESS_BASE: f64 = 1.122_018_454_301_963_3_f64;
 
 /// EBU R 128 Integrated Loudness calculation
 /// Basically a two-pass windowed RMS.
@@ -16,27 +19,19 @@ const MIN_FREQ: f64 = 16.0_f64;
 fn gated_rms(samples: &[f64], sample_rate: u32) -> f64 {
     let mut ebur128 = EbuR128::new(1_u32, sample_rate, Mode::I).expect("Shouldn't happen");
     // .add_frames_f64_planar() sucks since it requires an array of channel arrays, so for one channel, it needs an array around it
-    // f64 samples are not needed
     _ = ebur128.add_frames_f64(samples);
     let loudness = ebur128.loudness_global().expect("Shouldn't happen");
 
-    10.0_f64.powf(loudness * 0.05_f64)
+    LOUDNESS_BASE.powf(loudness)
 }
 
-/// Active DC removal
-fn remove_dc(sample_rate: u32, channel: &mut [f64]) {
-    let f64_sample_rate = f64::from(sample_rate);
-
-    // Discrete-time high pass filter with `MIN_FREQ/2`hz as the corner frequency
-    // i.e. at `MIN_FREQ/2`hz, the level should be lowered by 3dB
-    let alpha = f64_sample_rate / f64::mul_add(MIN_FREQ, PI, f64_sample_rate);
-    let mut previous_output = 0.0_f64;
-    let mut previous_input = 0.0_f64;
-    for input in channel.iter_mut() {
-        let passed_output = alpha * (previous_output + *input - previous_input);
-        previous_input = *input;
-        previous_output = passed_output;
-        *input = passed_output;
+/// Plain DC removal
+/// A high-pass filter isn't being used here in order to preserve the shape of the waveform
+fn remove_dc(channel: &mut [f64]) {
+    let length = channel.len() as f64;
+    let dc = channel.iter().sum::<f64>() / length;
+    for samp in channel.iter_mut() {
+        *samp -= dc;
     }
 }
 
@@ -51,14 +46,8 @@ pub fn process_samples(
 
     // Remove DC before processing
     // DC might affect magnitude of `MIN_FREQ` Hz and interpolated values close to it
-    // MIN_FREQ should be inaudible as is, so removing all audio at MIN_FREQ/2 or lower should be fine
-    // If you wanted bass down there, it'd be better to generate it yourself with another plugin
-    remove_dc(sample_rate, &mut left_channel);
-    remove_dc(sample_rate, &mut left_channel);
-    remove_dc(sample_rate, &mut left_channel);
-    remove_dc(sample_rate, &mut right_channel);
-    remove_dc(sample_rate, &mut right_channel);
-    remove_dc(sample_rate, &mut right_channel);
+    remove_dc(&mut left_channel);
+    remove_dc(&mut right_channel);
 
     // Integrated Loudness shouldn't be affected by DC noise, but this is placed after DC removal just in case
     let true_left_rms = gated_rms(&left_channel, sample_rate);
@@ -68,17 +57,17 @@ pub fn process_samples(
     // Average out plain RMS of left and right channels before processing
     // Might help in phase conflicts
     // Human hearing doesn't matter here
-    let length_recip = 1.0_f64 / left_channel.len() as f64;
+    let length_recip = 1_f64 / left_channel.len() as f64;
     let plain_left_rms = f64::sqrt(
         left_channel
             .iter()
-            .fold(0.0_f64, |acc, samp| samp.mul_add(*samp, acc))
+            .fold(0_f64, |acc, samp| samp.mul_add(*samp, acc))
             * length_recip,
     );
     let plain_right_rms = f64::sqrt(
         right_channel
             .iter()
-            .fold(0.0_f64, |acc, samp| samp.mul_add(*samp, acc))
+            .fold(0_f64, |acc, samp| samp.mul_add(*samp, acc))
             * length_recip,
     );
     let plain_mean_rms = f64::sqrt(plain_left_rms * plain_right_rms);
@@ -97,6 +86,7 @@ pub fn process_samples(
     // There isn't really a benefit to removing the noise now, and DC noise will be added later anyways
 
     // Average out the loudness of the left and right channels
+    // This handles amplification by RustFFT and overlap-adding, assuming there isn't much precision loss
     let processed_left_rms = gated_rms(&processed_left, sample_rate);
     let processed_right_rms = gated_rms(&processed_right, sample_rate);
     let processed_left_mult = true_mean_rms / processed_left_rms;

@@ -5,7 +5,6 @@ use std::path::Path;
 /// Export processed audio to the output using `hound`
 pub fn export_audio(file_path: &Path, audio: &(Vec<f64>, Vec<f64>), sample_rate: u32) {
     // TODO: add simple functionality for mono signals?
-    // Might be a lot of work for something you can re-render to stereo in foobar2000
     let spec = WavSpec {
         channels: 2,
         sample_rate,

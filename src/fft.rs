@@ -16,6 +16,24 @@ const WINDOW_COSINES: [(f64, f64); 5] = [
     (5.0 * TAU, -0.006_628_8_f64),
 ];
 
+/// Windowing is used to make the signal chunk fade in and out
+///   to prevent discontinuities, which causes spectral leakage (noise tuned to the music).
+fn window(time_frame: usize) -> Box<[f64]> {
+    let f64_rate_recip = 1_f64 / (time_frame as f64);
+    // The actual level of the window doesn't really matter
+    // Window selection: minimize side-lobe level, ignore bandwidth of main lobe?
+    (0..time_frame)
+        .map(|n| {
+            WINDOW_COSINES
+                .iter()
+                .copied()
+                .fold(1_f64, |acc, (internal, external)| {
+                    external.mul_add(f64::cos(internal * n as f64 * f64_rate_recip), acc)
+                })
+        })
+        .collect()
+}
+
 /// Faster `.norm_sqr()` that uses `mul_add`
 fn norm_squared(complex: Complex<f64>) -> f64 {
     f64::mul_add(complex.re, complex.re, complex.im * complex.im)
@@ -67,24 +85,6 @@ fn align(original_left: &mut Complex<f64>, original_right: &mut Complex<f64>) {
     }
 }
 
-/// Windowing is used to make the signal chunk fade in and out
-///   to prevent discontinuities, which causes spectral leakage (noise tuned to the music).
-fn window(time_frame: usize) -> Box<[f64]> {
-    let f64_rate_recip = 1.0_f64 / (time_frame as f64);
-    // The actual level of the window doesn't really matter
-    // Window selection: minimize side-lobe level, ignore bandwidth of main lobe?
-    (0..time_frame)
-        .map(|n| {
-            WINDOW_COSINES
-                .iter()
-                .copied()
-                .fold(1.0_f64, |acc, (internal, external)| {
-                    external.mul_add(f64::cos(internal * n as f64 * f64_rate_recip), acc)
-                })
-        })
-        .collect()
-}
-
 /// Specific overlapping
 pub fn overlapping_fft(
     planner: &mut RealFftPlanner<f64>,
@@ -101,17 +101,9 @@ pub fn overlapping_fft(
 
     // Lots of Vecs are used here to reuse memory space instead of reallocating
     // For fft_size specifically, there's different opinions online on how much zero-padding is needed
-    //   Here, at least 75% of the FFT will be added silence
-    //   e.g. 0 uses of .next_power_of_two() == 0% silence,
-    //        1 use of .next_power_of_two() == 0% up to 50% silence,
-    //        2 uses of .next_power_of_two() == 50% up to 75% silence,
-    //        3 uses of .next_power_of_two() == 75% up to 87.5% silence,
-    //        and so on...
     let fft_size = rounded_time_frame
-        .next_power_of_two()
-        .next_power_of_two()
-        .next_power_of_two();
-    let fft_norm = 1.0_f64 / fft_size as f64;
+        .next_power_of_two() // Round to next power of two for more zero-padding and for fast FFT algorithm
+        .saturating_mul(2_usize); // Ensure at least 50% of FFT is silence
     let r2c = planner.plan_fft_forward(fft_size);
     let c2r = planner.plan_fft_inverse(fft_size);
     let mut left_chunk = Vec::with_capacity(fft_size);
@@ -122,23 +114,23 @@ pub fn overlapping_fft(
     let mut scratch_real = c2r.make_scratch_vec();
 
     // This consumes left_channel and right_channel
-    let mut extended_left = vec![0.0_f64; half_time_frame]; // Allow half-window at start
-    let mut extended_right = vec![0.0_f64; half_time_frame];
+    let mut extended_left = vec![0_f64; half_time_frame]; // Allow half-window at start
+    let mut extended_right = vec![0_f64; half_time_frame];
     extended_left.extend(left_channel);
     extended_right.extend(right_channel);
-    extended_left.extend(vec![0.0_f64; fft_size]); // Allow for last FFT chunk to be added
-    extended_right.extend(vec![0.0_f64; fft_size]);
+    extended_left.extend(vec![0_f64; fft_size]); // Allow for last FFT chunk to be added
+    extended_right.extend(vec![0_f64; fft_size]);
     let extended_length = extended_left.len();
 
-    let mut holding_left = vec![0.0_f64; extended_length];
-    let mut holding_right = vec![0.0_f64; extended_length];
+    let mut holding_left = vec![0_f64; extended_length];
+    let mut holding_right = vec![0_f64; extended_length];
     let mut holding_position = 0_usize;
 
     let window = window(rounded_time_frame);
 
     // Windows need a bunch of hops
     // Doing more chunks will help with clicking/zipper noise, but will increase runtime
-    let hop_time_frame = 1.0_f64 / (WINDOW_COSINES.len() as f64 + 1.0_f64);
+    let hop_time_frame = 1_f64 / (WINDOW_COSINES.len() as f64 + 1_f64);
     let hop_size = (time_frame * hop_time_frame).round_ties_even() as usize;
 
     // Up until the end, which should be basically a half-window
@@ -163,8 +155,8 @@ pub fn overlapping_fft(
             },
         );
 
-        left_chunk.resize(fft_size, 0.0_f64);
-        right_chunk.resize(fft_size, 0.0_f64);
+        left_chunk.resize(fft_size, 0_f64);
+        right_chunk.resize(fft_size, 0_f64);
 
         _ = r2c.process_with_scratch(&mut left_chunk, &mut left_complex, &mut scratch_complex);
         _ = r2c.process_with_scratch(&mut right_chunk, &mut right_complex, &mut scratch_complex);
@@ -182,11 +174,8 @@ pub fn overlapping_fft(
         _ = c2r.process_with_scratch(&mut left_complex, &mut left_chunk, &mut scratch_real);
         _ = c2r.process_with_scratch(&mut right_complex, &mut right_chunk, &mut scratch_real);
 
-        // RustFFT, and in turn RealFFT, do not perform post-FFT normalization
-        izip!(left_chunk.iter_mut(), right_chunk.iter_mut()).for_each(|(left_samp, right_samp)| {
-            *left_samp *= fft_norm;
-            *right_samp *= fft_norm;
-        });
+        // RealFFT, which uses RustFFT, amplifies the signal by fft_size
+        // Normalization happens later in processing.rs
 
         #[expect(
             clippy::iter_with_drain,
@@ -206,11 +195,8 @@ pub fn overlapping_fft(
         holding_position = usize::strict_add(holding_position, hop_size);
     }
 
-    let f64_hop_time_frame = hop_time_frame;
-    izip!(holding_left.iter_mut(), holding_right.iter_mut()).for_each(|(hold_left, hold_right)| {
-        *hold_left *= f64_hop_time_frame;
-        *hold_right *= f64_hop_time_frame;
-    });
+    // Overlap-adding amplifies the signal by (WINDOW_COSINES.len() as f64 + 1_f64) or 1/hop_time_frame
+    // Normalization happens later in processing.rs
 
     (
         holding_left
