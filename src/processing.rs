@@ -83,10 +83,13 @@ pub fn process_samples(
         fft::overlapping_fft(planner, time_frame, left_channel, right_channel);
 
     // STFT will generate sub-MIN_FREQ noise
-    // There isn't really a benefit to removing the noise now, and DC noise will be added later anyways
+    // As such, DC noise is likely added and should be removed since we'll multiply the signals later
+    remove_dc(&mut processed_left);
+    remove_dc(&mut processed_right);
 
     // Average out the loudness of the left and right channels
     // This handles amplification by RustFFT and overlap-adding, assuming there isn't much precision loss
+    // TODO: This might make the first -70dB pass redundant
     let processed_left_rms = gated_rms(&processed_left, sample_rate);
     let processed_right_rms = gated_rms(&processed_right, sample_rate);
     let processed_left_mult = true_mean_rms / processed_left_rms;

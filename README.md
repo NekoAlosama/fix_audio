@@ -29,15 +29,10 @@ __Known problems I can't seem to fix__:
     * Video files with an audio track
     * .opus files
     * .mp3 files: does not support invalid CRC checksums, so output files will have added silence
-* FFT alignment algorithm produces clicks/distortion/zipper noise in certian audio
-  * Main test song: SOPHIE - "JUST LIKE WE NEVER SAID GOODBYE"
-    * Theoretically ideal algorithm produces clicks
-    * Channels may be highly uncorrelated
-    * Song might contain frequencies which aren't accurately captured by FFT resolution
 * FFT alignment algorithm produces high peak levels in certain audio
   * Main test song: DJ Screw - "Backstreets (Screwed)"
     * Out-of-phase cough with reverb at 7:12
-    * +9.17dB peak level even with added DC noise
+    * +9.25dB peak level even with added DC noise
 * FFT produces relatively minor frequency smearing / pre-echo
   * Mainly affects very short hi-hats and sounds delayed in one channel
 
@@ -46,7 +41,13 @@ __Things to do__:
   * Best library seems to be `lofty-rs`
 * Add option and confirmation to delete input files after processing
   * Needs tag copying
-* Increase program efficiency
+* Improve program efficiency
+  * Approximate performance:
+    * 0.80 minutes of 44.1khz audio per real-life second
+    * 0.74 minutes of 48khz audio per real-life second
+    * 0.37 minutes of 96khz audio per real-life second
+    * 0.185 minutes of 192khz audio per real-life second
+  * Try a simpler FFT window with less cosine terms
   * Implement multithreading?
   * (Windows only) Set the program's priority class (Idle -> Above Normal) and I/O priority (Normal -> High)
     * Approximate 50% speedup (90s to 60s on an old test suite) using System Informer to apply priorities

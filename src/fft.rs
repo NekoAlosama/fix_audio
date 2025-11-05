@@ -4,16 +4,21 @@ use realfft::{RealFftPlanner, num_complex::Complex};
 
 /// List of cosine coefficients of window function
 // https://holometer.fnal.gov/GH_FFT.pdf
-// Processing time can be reduced using an HFTxx(D) window with less coefficients
-// Currently using D.3.4 HFT116D, good enough to capture all 19.4-bit-or-less audio
-// Might be worth experimenting with the HFT70, HFT95, or HFT90D since spectral leakage might not be noticed here
-// (Internal multiplier, external multiplier)
-const WINDOW_COSINES: [(f64, f64); 5] = [
-    (TAU, -1.957_537_5_f64),
-    (2.0 * TAU, 1.478_070_5_f64),
-    (3.0 * TAU, -0.636_743_1_f64),
-    (4.0 * TAU, 0.122_838_9_f64),
-    (5.0 * TAU, -0.006_628_8_f64),
+// Currently using the HFT248D window, which needs 11 overlaps but has
+//   a maximum leakage level of -248.4dB.
+// While this seems like overkill, the levels are amplified due to FFT and overlap-adding,
+//   so there is a chance that a lesser window would introduce clicks
+const WINDOW_COSINES: [(f64, f64); 10] = [
+    (1. * TAU, -1.985_844_164_102),
+    (2. * TAU, 1.791_176_438_506),
+    (3. * TAU, -1.282_075_284_005),
+    (4. * TAU, 0.667_777_530_266),
+    (5. * TAU, -0.240_160_796_57),
+    (6. * TAU, 0.056_656_381_764),
+    (7. * TAU, -0.008_134_974_479),
+    (8. * TAU, 0.000_624_544_650),
+    (9. * TAU, -0.000_019_808_998),
+    (10. * TAU, 0.000_000_132_974),
 ];
 
 /// Windowing is used to make the signal chunk fade in and out
@@ -45,7 +50,6 @@ fn is_finite(complex: Complex<f64>) -> bool {
 }
 
 /// Aligns the phase angle of the left and right channels
-/// Clicks still present unfortunately
 #[expect(
     clippy::arithmetic_side_effects,
     reason = "clippy thinks the operations done on Complex<f64> are for integers"
@@ -56,32 +60,15 @@ fn align(original_left: &mut Complex<f64>, original_right: &mut Complex<f64>) {
     let left_norm = norm_squared(*original_left).sqrt();
     let right_norm = norm_squared(*original_right).sqrt();
 
-    let normal_sum = *original_left + *original_right; // Circular mean, or weighted average angle
-    let angle_sum = *original_left / left_norm + *original_right / right_norm; // Unweighted average angle
-
-    // This target_sum introduces fewer clicks compared to normal_sum or angle_sum by themselves
-    // TODO: understand why this happens and why it's not enough to eliminate clicks
-    // TODO: experiment with adding coefficients to normal_sum or angle_sum
-    let target_sum = normal_sum + angle_sum;
-    let mut normalized_sum = target_sum / norm_squared(target_sum).sqrt();
+    let target_sum = *original_left + *original_right;
+    let normalized_sum = target_sum / norm_squared(target_sum).sqrt();
     if is_finite(normalized_sum) {
         *original_left = left_norm * normalized_sum;
         *original_right = right_norm * normalized_sum;
     } else {
-        // If normalized_sum has NaNs or Inf's, that means that left_norm, right_norm, or norm_squared(target_sum).sqrt() was near zero
-        // That could mean that one channel was silence or that the channels are exactly out-of-phase
-        // Since normal_sum can't produce NaNs by itself, we should try that if one channel was silence
-        normalized_sum = normal_sum / norm_squared(normal_sum).sqrt();
-
-        if is_finite(normalized_sum) {
-            *original_left = left_norm * normalized_sum;
-            *original_right = right_norm * normalized_sum;
-        } else {
-            // If normalized_sum has NaNs or Inf's, that means that the channels were exactly out-of-phase, or
-            //   `*original_left` approximately equals `-*original_right`
-            // To avoid NaNs/Inf's and be consistent, we just copy the left channel to the right channel to align them
-            *original_right = *original_left;
-        }
+        // If the above doesn't work, the channels are out-of-phase with each other. To be consistent,
+        //   we'll just invert the right channel or copy the left channel to make them in-phase.
+        *original_right = *original_left;
     }
 }
 
