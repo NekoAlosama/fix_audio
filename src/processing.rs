@@ -38,9 +38,9 @@ fn remove_dc(channel: &mut [f64]) {
 /// All three processing steps into one function
 pub fn process_samples(
     planner: &mut RealFftPlanner<f64>,
-    data: (Vec<f64>, Vec<f64>),
+    data: (Box<[f64]>, Box<[f64]>),
     sample_rate: u32,
-) -> (Vec<f64>, Vec<f64>) {
+) -> (Box<[f64]>, Box<[f64]>) {
     let mut left_channel = data.0;
     let mut right_channel = data.1;
 

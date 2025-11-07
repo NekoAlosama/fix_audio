@@ -11,7 +11,7 @@ use symphonia::{
 };
 
 /// Seperated here due to Clippy lint
-type AudioMatrix = ((Vec<f64>, Vec<f64>), u32);
+type AudioMatrix = ((Box<[f64]>, Box<[f64]>), u32);
 /// Get samples and metadata for a given file using `Symphonia`
 pub fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Error> {
     // Based on `Symphonia`'s docs.rs page and example code (mix of 0.5.4 and dev-0.6)
@@ -82,10 +82,7 @@ pub fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Err
                                 sample_buf = vec![vec![0_f64; audio_buf.samples_planar()]];
                             }
                             2 => {
-                                sample_buf = vec![
-                                    vec![0_f64; audio_buf.samples_planar()],
-                                    vec![0_f64; audio_buf.samples_planar()],
-                                ];
+                                sample_buf = vec![vec![0_f64; audio_buf.samples_planar()]; 2];
                             }
                             _ => {
                                 return Err(Error::Unsupported("Too many channels"));
@@ -118,12 +115,25 @@ pub fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Err
         }
     }
 
-    if channel_count == 1 {
-        right_samples.copy_from_slice(&left_samples);
-    }
-
-    left_samples.shrink_to_fit();
-    right_samples.shrink_to_fit();
     // TODO: return error if fft_total would be larger than usize::MAX
-    Ok(((left_samples, right_samples), sample_rate))
+    if channel_count == 2 {
+        Ok((
+            (
+                left_samples.into_boxed_slice(),
+                right_samples.into_boxed_slice(),
+            ),
+            sample_rate,
+        ))
+    } else {
+        // channel_count = 1
+        // Upmixing mono audio to two channels
+        // TODO: add speecial functionality for mono audio
+        Ok((
+            (
+                left_samples.clone().into_boxed_slice(),
+                left_samples.into_boxed_slice(),
+            ),
+            sample_rate,
+        ))
+    }
 }

@@ -43,12 +43,14 @@ __Things to do__:
   * Needs tag copying
 * Improve program efficiency
   * Approximate performance:
-    * 0.80 minutes of 44.1khz audio per real-life second
-    * 0.74 minutes of 48khz audio per real-life second
-    * 0.37 minutes of 96khz audio per real-life second
-    * 0.185 minutes of 192khz audio per real-life second
+    * High variance due to I/O (disk and RAM), CPU performance should be consistent
+    * 0.832 minutes of 44.1khz audio per real-life second
+    * 0.765 minutes of 48khz audio per real-life second
+    * 0.382 minutes of 96khz audio per real-life second
+    * 0.191 minutes of 192khz audio per real-life second
   * Try a simpler FFT window with less cosine terms
   * Implement multithreading?
+  * `mimalloc` being used as an alternative allocator. Minor 20MB overallocation and may give better performance on other platforms
   * (Windows only) Set the program's priority class (Idle -> Above Normal) and I/O priority (Normal -> High)
     * Approximate 50% speedup (90s to 60s on an old test suite) using System Informer to apply priorities
   * Add shortcut for mono files (add DC noise only)

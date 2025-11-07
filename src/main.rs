@@ -20,6 +20,9 @@ use crate::decoding::get_samples_and_metadata;
 use crate::exporting::export_audio;
 use crate::processing::process_samples;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 // Hard-coded directories
 /// Input directory, created on first run
 const INPUT_DIR: &str = "./inputs/";
@@ -28,7 +31,7 @@ const OUTPUT_DIR: &str = "./outputs/";
 
 /// Recursive file path retriever from `StackOverflow`
 /// TODO: check if there's a newer std function or crate to do this
-fn get_paths(directory: path::PathBuf) -> io::Result<Vec<path::PathBuf>> {
+fn get_paths(directory: path::PathBuf) -> io::Result<Box<[path::PathBuf]>> {
     let mut entries: Vec<path::PathBuf> = vec![];
     let folder_read = fs::read_dir(directory)?;
 
@@ -37,15 +40,15 @@ fn get_paths(directory: path::PathBuf) -> io::Result<Vec<path::PathBuf>> {
         let meta = unwrapped_entry.metadata()?;
 
         if meta.is_dir() {
-            let mut subdir = get_paths(unwrapped_entry.path())?;
-            entries.append(&mut subdir);
+            let subdir = get_paths(unwrapped_entry.path())?;
+            entries.extend(subdir);
         }
 
         if meta.is_file() {
             entries.push(unwrapped_entry.path());
         }
     }
-    Ok(entries)
+    Ok(entries.into_boxed_slice())
 }
 
 /// Main function to execute
@@ -66,7 +69,7 @@ fn main() -> Result<(), Error> {
     }
 
     // Get list of files in INPUT_DIR
-    let entries: Vec<path::PathBuf> = get_paths(INPUT_DIR.into())?;
+    let entries = get_paths(INPUT_DIR.into())?;
 
     let mut planner = RealFftPlanner::new();
     println!("Setup and file-exploring time: {:#?}", time.elapsed());
@@ -77,7 +80,7 @@ fn main() -> Result<(), Error> {
         io::stdout().flush()?; // Show print instantly
         let mut output_path = path::PathBuf::from(OUTPUT_DIR).join(stripped_entry);
 
-        let channels: (Vec<f64>, Vec<f64>);
+        let channels: (Box<[f64]>, Box<[f64]>);
         let sample_rate: u32;
         // If we can't properly decode the data, it's likely not audio data
         // In this case, we just send it to OUTPUT_DIR so it's not spitting the warning every run
@@ -122,7 +125,7 @@ fn main() -> Result<(), Error> {
         io::stdout().flush()?;
         output_path.set_extension("wav");
         fs::create_dir_all(output_path.parent().unwrap())?;
-        export_audio(&output_path, &modified_audio, sample_rate);
+        export_audio(&output_path, modified_audio, sample_rate);
 
         println!("	T+{:#?} ", time.elapsed());
     }
