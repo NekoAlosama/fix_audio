@@ -20,7 +20,7 @@ Currently, this program takes in stereo audio files (input folder created on fir
     * If this step causes problems, it will be removed and this section will advertise the DC removal step
   * Use case: Reduce peak levels while keeping the same loudness
 
-Processed audio files are sent to the output folder as 32-bit floating-point .wav files. Non-audio files (covers, documents, etc.) are transfered to the output folder. The original audio files are kept in the input folder, so remember to delete them if you don't need to re-run the program with changes.
+Processed audio files are sent to the output folder as 32-bit floating-point .wav files with tags and embedded covers transfered over. Non-audio files (covers, documents, etc.) are transfered to the output folder. The original audio files are kept in the input folder, so remember to delete them if you don't need to re-run the program with changes.
 
 ## Reflection
 __Known problems I can't seem to fix__:
@@ -37,17 +37,14 @@ __Known problems I can't seem to fix__:
   * Mainly affects very short hi-hats and sounds delayed in one channel
 
 __Things to do__:
-* Copy tags from input to output
-  * Best library seems to be `lofty-rs`
 * Add option and confirmation to delete input files after processing
-  * Needs tag copying
 * Improve program efficiency
   * Approximate performance:
     * High variance due to I/O (disk and RAM), CPU performance should be consistent
-    * 0.832 minutes of 44.1khz audio per real-life second
-    * 0.765 minutes of 48khz audio per real-life second
-    * 0.382 minutes of 96khz audio per real-life second
-    * 0.191 minutes of 192khz audio per real-life second
+    * 0.759 minutes of 44.1khz audio per real-life second
+    * 0.698 minutes of 48khz audio per real-life second
+    * 0.349 minutes of 96khz audio per real-life second
+    * 0.174 minutes of 192khz audio per real-life second
   * Try a simpler FFT window with less cosine terms
   * Implement multithreading?
   * `mimalloc` being used as an alternative allocator. Minor 20MB overallocation and may give better performance on other platforms

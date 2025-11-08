@@ -7,18 +7,14 @@ mod fft;
 /// Processing module
 mod processing;
 
-use realfft::RealFftPlanner;
 use std::{
     fs,
     io::{self, Write as _},
-    path::{self},
-    time,
+    path, time,
 };
-use symphonia::core::errors::Error;
 
-use crate::decoding::get_samples_and_metadata;
-use crate::exporting::export_audio;
-use crate::processing::process_samples;
+use realfft::RealFftPlanner;
+use symphonia::core::errors::Error;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -36,7 +32,7 @@ fn get_paths(directory: path::PathBuf) -> io::Result<Box<[path::PathBuf]>> {
     let folder_read = fs::read_dir(directory)?;
 
     for entry in folder_read {
-        let unwrapped_entry = entry?;
+        let unwrapped_entry = entry.expect("ERROR: unreadable file");
         let meta = unwrapped_entry.metadata()?;
 
         if meta.is_dir() {
@@ -80,15 +76,10 @@ fn main() -> Result<(), Error> {
         io::stdout().flush()?; // Show print instantly
         let mut output_path = path::PathBuf::from(OUTPUT_DIR).join(stripped_entry);
 
-        let channels: (Box<[f64]>, Box<[f64]>);
-        let sample_rate: u32;
         // If we can't properly decode the data, it's likely not audio data
         // In this case, we just send it to OUTPUT_DIR so it's not spitting the warning every run
-        match get_samples_and_metadata(&entry) {
-            Ok(data) => {
-                channels = data.0;
-                sample_rate = data.1;
-            }
+        let channels = match decoding::get_samples(&entry) {
+            Ok(data) => data,
             // Catches most non-audio files such as pictures
             // Also catches detected-but-unimplemented audio like Opus files
             Err(Error::Unsupported(_)) => {
@@ -115,17 +106,21 @@ fn main() -> Result<(), Error> {
                 continue;
             }
             Err(other) => return Err(other), // some other unknown error
-        }
+        };
+
+        let (tags, sample_rate) = decoding::get_metadata(&entry);
 
         print!("	Processing... ");
         io::stdout().flush()?;
-        let modified_audio = process_samples(&mut planner, channels, sample_rate);
+        let modified_audio = processing::process_samples(&mut planner, channels, sample_rate);
 
         print!("	Exporting...");
         io::stdout().flush()?;
         output_path.set_extension("wav");
         fs::create_dir_all(output_path.parent().unwrap())?;
-        export_audio(&output_path, modified_audio, sample_rate);
+        exporting::export_audio(&output_path, modified_audio, sample_rate);
+        // Unfortunately doubles Exporting time since `hound` clears all tags when calling `.finalize()`
+        exporting::write_tags(&output_path, tags);
 
         println!("	T+{:#?} ", time.elapsed());
     }

@@ -1,4 +1,10 @@
 use std::{fs, path};
+
+use lofty::{
+    file::{AudioFile as _, TaggedFileExt as _},
+    probe::Probe,
+    tag::Tag,
+};
 use symphonia::{
     core::{
         codecs::audio::AudioDecoderOptions,
@@ -10,10 +16,10 @@ use symphonia::{
     default,
 };
 
-/// Seperated here due to Clippy lint
-type AudioMatrix = ((Box<[f64]>, Box<[f64]>), u32);
-/// Get samples and metadata for a given file using `Symphonia`
-pub fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Error> {
+/// Filler type being used because of a Clippy lint
+type SamplesResult = Result<(Box<[f64]>, Box<[f64]>), Error>;
+/// Get samples for a given file using `Symphonia`
+pub fn get_samples(path: &path::PathBuf) -> SamplesResult {
     // Based on `Symphonia`'s docs.rs page and example code (mix of 0.5.4 and dev-0.6)
     // Numbers are from the `Symphonia` basic proceedures in its docs.rs
 
@@ -47,12 +53,18 @@ pub fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Err
     )?;
 
     // 7
-    let track = format.default_track(TrackType::Audio).unwrap();
+    let track = format
+        .default_track(TrackType::Audio)
+        .expect("ERROR: no tracks found");
 
     // 8
     let mut decoder = codec_registry.make_audio_decoder(
-        // Don't know why the two unwraps are needed
-        track.codec_params.as_ref().unwrap().audio().unwrap(),
+        track
+            .codec_params
+            .as_ref()
+            .expect("ERROR: unplayable file")
+            .audio()
+            .expect("ERROR: unknown audio parameters"),
         &AudioDecoderOptions::default(),
     )?;
 
@@ -62,7 +74,6 @@ pub fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Err
     let mut right_samples: Vec<f64> = vec![];
 
     let mut sample_buf: Vec<Vec<f64>> = vec![];
-    let mut sample_rate = 0;
     let mut channel_count = 0;
 
     // 9
@@ -72,8 +83,7 @@ pub fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Err
         if packet.track_id() == track_id {
             match decoder.decode(&packet) {
                 Ok(audio_buf) => {
-                    if sample_rate == 0 {
-                        sample_rate = audio_buf.spec().rate();
+                    if channel_count == 0 {
                         channel_count = audio_buf.num_planes();
 
                         // .copy_to_vecs_planar() requires a Vec containing the channels
@@ -115,25 +125,41 @@ pub fn get_samples_and_metadata(path: &path::PathBuf) -> Result<AudioMatrix, Err
         }
     }
 
+    if left_samples.is_empty() {
+        return Err(Error::Unsupported("No audio found"));
+    }
+
     // TODO: return error if fft_total would be larger than usize::MAX
     if channel_count == 2 {
         Ok((
-            (
-                left_samples.into_boxed_slice(),
-                right_samples.into_boxed_slice(),
-            ),
-            sample_rate,
+            left_samples.into_boxed_slice(),
+            right_samples.into_boxed_slice(),
         ))
     } else {
         // channel_count = 1
         // Upmixing mono audio to two channels
         // TODO: add speecial functionality for mono audio
         Ok((
-            (
-                left_samples.clone().into_boxed_slice(),
-                left_samples.into_boxed_slice(),
-            ),
-            sample_rate,
+            left_samples.clone().into_boxed_slice(),
+            left_samples.into_boxed_slice(),
         ))
     }
+}
+
+/// Get tags and sample rate for a given file using `lofty-rs`
+/// Good to use after using `get_samples()` to verify that audio was found.
+pub fn get_metadata(path: &path::PathBuf) -> (Option<Tag>, u32) {
+    let tagged_file = Probe::open(path)
+        .expect("ERROR: file removed")
+        .read()
+        .expect("ERROR: file in use");
+    let mut tags = tagged_file.primary_tag().cloned();
+    if tags.is_none() {
+        tags = tagged_file.first_tag().cloned();
+    }
+    let sample_rate = tagged_file
+        .properties()
+        .sample_rate()
+        .expect("ERROR: file has no sample rate");
+    (tags, sample_rate)
 }

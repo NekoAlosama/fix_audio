@@ -1,7 +1,8 @@
-use crate::fft;
 use ebur128::{EbuR128, Mode};
 use itertools::{Itertools as _, izip};
 use realfft::RealFftPlanner;
+
+use crate::fft;
 
 /// Force minimum reconstructed frequency to `MIN_FREQ` hertz
 /// Recommended range is 10hz to 20hz, inclusive
@@ -114,6 +115,5 @@ pub fn process_samples(
     );
 
     // Overall processing is done
-    // pack it up
     (processed_left, processed_right)
 }
