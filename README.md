@@ -4,7 +4,7 @@ Pet project of processing audio files by and for NekoAlosma to learn FFT process
 Currently, this program takes in stereo audio files (input folder created on first run) and:
 * Aligns the phase angle between the left and right channel
   * Concept based on Thimeo Stereo Tool's "Image phase amplifier: 0%", automated through Thimeo WatchCat
-    * Currently unable to replicate Stereo Tool's results, likely due to combination of window, overlapping, and alignment algorithm
+    * [Researching how to replicate its results](./research/)
   * Use case: switching between a mono speaker to a car stereo
     * Prevents per-frequency phase cancellation for a better downmix to mono
     * Heavily reduces the perceived stereo width, but instrument placement / channel-specific sounds are preserved
@@ -23,28 +23,23 @@ Currently, this program takes in stereo audio files (input folder created on fir
 Processed audio files are sent to the output folder as 32-bit floating-point .wav files with tags and embedded covers transfered over. Non-audio files (covers, documents, etc.) are transfered to the output folder. The original audio files are kept in the input folder, so remember to delete them if you don't need to re-run the program with changes.
 
 ## Reflection
-__Known problems I can't seem to fix__:
+### Known problems I can't seem to fix:
 * Symphonia dev-0.6 doesn't support certain codecs and features
   * Try converting unsupported music files to 32-bit .wav
     * Video files with an audio track
     * .opus files
     * .mp3 files: does not support invalid CRC checksums, so output files will have added silence
-* FFT alignment algorithm produces high peak levels in certain audio
-  * Main test song: DJ Screw - "Backstreets (Screwed)"
-    * Out-of-phase cough with reverb at 7:12
-    * +9.25dB peak level even with added DC noise
+* FFT alignment algorithm produces issues
+  * [Research is ongoing](./research/)
 * FFT produces relatively minor frequency smearing / pre-echo
   * Mainly affects very short hi-hats and sounds delayed in one channel
 
-__Things to do__:
+### Things to do:
 * Add option and confirmation to delete input files after processing
 * Improve program efficiency
   * Approximate performance:
     * High variance due to I/O (disk and RAM), CPU performance should be consistent
-    * 0.759 minutes of 44.1khz audio per real-life second
-    * 0.698 minutes of 48khz audio per real-life second
-    * 0.349 minutes of 96khz audio per real-life second
-    * 0.174 minutes of 192khz audio per real-life second
+    * \[Removed in order to focus on research above\]
   * Try a simpler FFT window with less cosine terms
   * Implement multithreading?
   * `mimalloc` being used as an alternative allocator. Minor 20MB overallocation and may give better performance on other platforms

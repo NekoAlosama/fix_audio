@@ -5,9 +5,8 @@ use realfft::RealFftPlanner;
 use crate::fft;
 
 /// Force minimum reconstructed frequency to `MIN_FREQ` hertz
-/// Recommended range is 10hz to 20hz, inclusive
-/// Some audio equipment can output 10hz or less
-const MIN_FREQ: f64 = 16_f64;
+/// Thimeo Stereo Tool uses 4096 samples, which is about 11hz between 44.1khz and 48khz audio
+const MIN_FREQ: f64 = 10_f64;
 
 /// 10^(1/20), for `gated_rms()`
 /// `10_f64.powf(loudness * 0.05_f64)` == `LOUDNESS_BASE.powf(loudness)`
@@ -78,6 +77,18 @@ pub fn process_samples(
         *left_samp *= left_mult;
         *right_samp *= right_mult;
     });
+
+    // Out-of-phase checker, flips the right channel if a majority of samples are out-of-phase
+    // Used to reduce a lot of near-zero-sum cases
+    let mut oop_counter: usize = 0;
+    izip!(left_channel.iter(), right_channel.iter()).for_each(|(left_samp, right_samp)| {
+        if left_samp.signum() != right_samp.signum() {
+            oop_counter = oop_counter.saturating_add(1);
+        }
+    });
+    if oop_counter as f64 >= 0.5_f64 * left_channel.len() as f64 {
+        right_channel.iter_mut().for_each(|samp| *samp = -*samp);
+    }
 
     let time_frame = f64::from(sample_rate) / MIN_FREQ; // actually in number of samples
     let (mut processed_left, mut processed_right) =

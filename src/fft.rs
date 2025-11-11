@@ -5,21 +5,14 @@ use realfft::{RealFftPlanner, num_complex::Complex};
 
 /// List of cosine coefficients of window function
 // https://holometer.fnal.gov/GH_FFT.pdf
-// Currently using the HFT248D window, which needs 11 overlaps but has
-//   a maximum leakage level of -248.4dB.
-// While this seems like overkill, the levels are amplified due to FFT and overlap-adding,
-//   so there is a chance that a lesser window would introduce clicks
-const WINDOW_COSINES: [(f64, f64); 10] = [
-    (1. * TAU, -1.985_844_164_102),
-    (2. * TAU, 1.791_176_438_506),
-    (3. * TAU, -1.282_075_284_005),
-    (4. * TAU, 0.667_777_530_266),
-    (5. * TAU, -0.240_160_796_57),
-    (6. * TAU, 0.056_656_381_764),
-    (7. * TAU, -0.008_134_974_479),
-    (8. * TAU, 0.000_624_544_650),
-    (9. * TAU, -0.000_019_808_998),
-    (10. * TAU, 0.000_000_132_974),
+// Currently using the HFT116D window, which needs 6 overlaps but has
+//   a maximum leakage level of -116.8dB, which should encapsulate all 16-bit integer audio
+const WINDOW_COSINES: [(f64, f64); 5] = [
+    (1. * TAU, -1.957_537_5),
+    (2. * TAU, 1.478_070_5),
+    (3. * TAU, -0.636_743_1),
+    (4. * TAU, 0.122_838_9),
+    (5. * TAU, -0.006_628_8),
 ];
 
 /// Windowing is used to make the signal chunk fade in and out
@@ -57,12 +50,12 @@ fn is_finite(complex: Complex<f64>) -> bool {
 fn align(original_left: &mut Complex<f64>, original_right: &mut Complex<f64>) {
     let left = *original_left;
     let right = *original_right;
-    let sum = left + right;
 
     // norm_squared().sqrt() is used over .hypot() for efficiency
     // TODO: maybe combine norm_squared().sqrt()? We never need norm_squared() by itself
     let left_sqr = norm_squared(left);
     let right_sqr = norm_squared(right);
+    let sum = left + right;
     let sum_sqr = norm_squared(sum);
 
     // Ideally, sum_sqr is not near zero, so we can make only two .sqrt() calls and one division
@@ -103,7 +96,7 @@ pub fn overlapping_fft(
     // Lots of Vecs are used here to reuse memory space instead of reallocating
     // For fft_size specifically, there's different opinions online on how much zero-padding is needed
     let mut fft_size = rounded_time_frame.next_power_of_two(); // Round to next power of 2 for some zero-padding and for a fast FFT
-    if (fft_size as f64 / rounded_time_frame as f64) < 1.5_f64 {
+    if (fft_size as f64) < 1.5_f64 * (rounded_time_frame as f64) {
         // Ensure fft_size is at least 150% of rounded_time_frame
         fft_size = fft_size.saturating_mul(2); // Move to the next power of two
     }
