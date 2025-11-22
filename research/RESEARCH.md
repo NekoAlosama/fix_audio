@@ -14,9 +14,9 @@ I think I may need outside help with this problem. I encourage someone out there
 * __More accurate/precise processing:__ This project uses 64-bit floating-point numbers in its calculations in order to prevent precision loss that might come with 32-bit floating-point numbers. For example, equalizing the RMS between the left and right channels using 32-bit floating-point numbers results in an error of about 0.02dB.
 * __Window function:__ assuming that this Stereo Tool setting uses STFT, the varying output level of its audio implies that the window function being used introduces scalloping loss, such that the prominent frequencies will be underestimated. A flat-top window would help with this in exchange with increasing runtime.
 * __Better algorithm:__ assuming that this Stereo Tool Setting uses STFT, we could implement a different algorithm which might be better than STFT. If it does not use STFT, the different algorithm could be close to the actual algorithm. Another item to attempt is fractional alignment, since e.g. "Image phase amplifier: 50%" and "Image phase amplifier: 200%" is possible in Stereo Tool.
-  * Complex wavelet transform: no known Rust implementation of the inverse complex wavelet transform
-  * Constant-Q transform: current known Rust implementation uses too much memory and runtime to be viable
-  * Analytic signal / Hilbert transform: sounds awful and produces large clicks, does have theoretically optimal properties like having equal polarity and zero-crossings for both channels
+  * Complex wavelet transform: have not tried yet, current known Rust implementation is not well documented and might be abandoned
+  * Constant-Q transform: current known Rust implementation uses too much memory and runtime to be viable, have not checked whether it's intrinsic to the algorithm or implementation is just not optimized well
+  * Analytic signal / Hilbert transform: sounds awful and produces large clicks, does have theoretically optimal properties like having equal polarity/zero-crossings for both channels
   * Full-song FFTs instead of STFT: spectral leakage/noise is obvious, even when using better windows or more zero-padding, is theoretically optimal besides that
   * Multiple all-pass filters: have not tried yet, currently researching if it is feasible
 * __Better transfer of tags:__ WatchCat fails to transfer the tags of audio that contain special Unicode characters or are just too long. Covers are also not transferred at all.

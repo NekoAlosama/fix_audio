@@ -13,12 +13,6 @@ Currently, this program takes in stereo audio files (input folder created on fir
   * Use case: ensure that one channel doesn't overpower the other over the course of a track
     * Uses the EBU R 128 Integrated Loudness, while RX 11 uses plain RMS
     * Plain RMS is affected by DC bias and does not account for human hearing
-* Add DC noise to reduce peak levels
-  * Currently being used to test where and when DC noise is noticable.
-    * DC may be removed when encoding to a lossy codec
-    * An actual DC removal step is used to improve the above two processes
-    * If this step causes problems, it will be removed and this section will advertise the DC removal step
-  * Use case: Reduce peak levels while keeping the same loudness
 
 Processed audio files are sent to the output folder as 32-bit floating-point .wav files with tags and embedded covers transfered over. Non-audio files (covers, documents, etc.) are transfered to the output folder. The original audio files are kept in the input folder, so remember to delete them if you don't need to re-run the program with changes.
 
@@ -31,21 +25,22 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
     * .mp3 files: does not support invalid CRC checksums, so output files will have added silence
 * FFT alignment algorithm produces issues
   * [Research is ongoing](./research/)
-* FFT produces relatively minor frequency smearing / pre-echo
-  * Mainly affects very short hi-hats and sounds delayed in one channel
+* FFT does not preserve the shape of waveforms below 20hz
+  * Side effect: FFT produces relatively minor frequency smearing / pre-echo depending on chosen frequency
+    * Mainly affects very short hi-hats and sounds delayed in one channel
+  * Stereo Tool suggests that it uses ~11hz, but no frequency smearing is detected?
 
 ### Things to do:
 * Add option and confirmation to delete input files after processing
 * Improve program efficiency
   * Approximate performance:
     * High variance due to I/O (disk and RAM), CPU performance should be consistent
-    * \[Removed in order to focus on research above\]
-  * Try a simpler FFT window with less cosine terms
+    * \[Removed in order to [focus on research](./research/) above\]
   * Implement multithreading?
   * `mimalloc` being used as an alternative allocator. Minor 20MB overallocation and may give better performance on other platforms
   * (Windows only) Set the program's priority class (Idle -> Above Normal) and I/O priority (Normal -> High)
     * Approximate 50% speedup (90s to 60s on an old test suite) using System Informer to apply priorities
-  * Add shortcut for mono files (add DC noise only)
+  * Add shortcut for mono files (remove DC noise only)
 * Add more error-checking
   * Handle all existing `.unwrap()`s and `.expect()`s
   * Vec memory allocation on 32-bit builds for long files of audio
@@ -53,6 +48,6 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
   * Test files that shorter than FFT (sound effects?)
   * Mono files are converted to stereo files
 * Make functions generic over floats (allow `f32` or `f64` in case more precision is needed)
-  * Considering using `f64` over `f32` always to ensure no quantization noise/errors
+  * Considering always using `f64` over `f32` to ensure no quantization noise/imprecision
 
 ![flamegraph](flamegraph.svg)

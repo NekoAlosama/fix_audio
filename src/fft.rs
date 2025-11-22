@@ -4,15 +4,17 @@ use itertools::izip;
 use realfft::{RealFftPlanner, num_complex::Complex};
 
 /// List of cosine coefficients of window function
-// https://holometer.fnal.gov/GH_FFT.pdf
-// Currently using the HFT116D window, which needs 6 overlaps but has
-//   a maximum leakage level of -116.8dB, which should encapsulate all 16-bit integer audio
-const WINDOW_COSINES: [(f64, f64); 5] = [
-    (1. * TAU, -1.957_537_5),
-    (2. * TAU, 1.478_070_5),
-    (3. * TAU, -0.636_743_1),
-    (4. * TAU, 0.122_838_9),
-    (5. * TAU, -0.006_628_8),
+///
+/// Taken from <https://holometer.fnal.gov/GH_FFT.pdf>
+// Ideal candidate is HFT144D, a flat top window which needs 7 overlaps and has a noise floor of -144.1dB, enough for the humman auditory system
+// The bandwidth of the main lobe doesn't seem to matter for some reason
+const WINDOW_COSINES: [(f64, f64); 6] = [
+    (1. * TAU, -1.967_600_33),
+    (2. * TAU, 1.579_836_07),
+    (3. * TAU, -0.811_236_44),
+    (4. * TAU, 0.225_835_58),
+    (5. * TAU, -0.027_738_48),
+    (6. * TAU, 0.000_903_60),
 ];
 
 /// Windowing is used to make the signal chunk fade in and out
@@ -33,12 +35,12 @@ fn window(time_frame: usize) -> Box<[f64]> {
 }
 
 /// Faster `.norm_sqr()` that uses `mul_add`
-fn norm_squared(complex: Complex<f64>) -> f64 {
+fn norm_squared(complex: &Complex<f64>) -> f64 {
     f64::mul_add(complex.re, complex.re, complex.im * complex.im)
 }
 
 /// Faster `.is_finite()` that skips NaN check in `num_traits::FloatCore`
-fn is_finite(complex: Complex<f64>) -> bool {
+fn is_finite(complex: &Complex<f64>) -> bool {
     complex.re.abs() < f64::INFINITY && complex.im.abs() < f64::INFINITY
 }
 
@@ -48,29 +50,28 @@ fn is_finite(complex: Complex<f64>) -> bool {
     reason = "clippy thinks the operations done on Complex<f64> are for integers"
 )]
 fn align(original_left: &mut Complex<f64>, original_right: &mut Complex<f64>) {
-    let left = *original_left;
-    let right = *original_right;
+    // custom function is used over .hypot() for efficiency
+    let left_norm_sqr = norm_squared(original_left);
+    let right_norm_sqr = norm_squared(original_right);
 
-    // norm_squared().sqrt() is used over .hypot() for efficiency
-    // TODO: maybe combine norm_squared().sqrt()? We never need norm_squared() by itself
-    let left_sqr = norm_squared(left);
-    let right_sqr = norm_squared(right);
-    let sum = left + right;
-    let sum_sqr = norm_squared(sum);
-
-    // Ideally, sum_sqr is not near zero, so we can make only two .sqrt() calls and one division
-    let sum_mult = sum_sqr.recip();
-    let new_left = sum * (left_sqr * sum_mult).sqrt();
-    let new_right = sum * (right_sqr * sum_mult).sqrt();
-    if is_finite(new_left) && is_finite(new_right) {
-        *original_left = new_left;
-        *original_right = new_right;
-    } else {
-        // If the above doesn't work, `sum_mult` produced Inf or NaN, meaning that `sum_sqr` is near zero
-        // The channels are almost exactly out-of-phase with each other, so
-        //   we'll just invert the right channel or copy the left channel to make them in-phase.
-        *original_right = *original_left;
+    // This method aligns the quieter channel with the louder channel.
+    // Mathematically, this seems to minimize the rotation distance needed.
+    // Of course, this still creates clicks, but is simpler than the `sum` method
+    if left_norm_sqr < right_norm_sqr {
+        let new_left = *original_right * (left_norm_sqr / right_norm_sqr).sqrt();
+        if is_finite(&new_left) {
+            *original_left = new_left;
+        }
     }
+    // Implicitly left_norm_sqr >= right_norm_sqr
+    else {
+        let new_right = *original_left * (right_norm_sqr / left_norm_sqr).sqrt();
+        if is_finite(&new_right) {
+            *original_right = new_right;
+        }
+    }
+
+    // If no channel was changed, then left_norm_sqr and right_norm_sqr had to be pretty small
 }
 
 /// Specific overlapping
@@ -88,36 +89,33 @@ pub fn overlapping_fft(
     let half_time_frame = (time_frame * 0.5_f64).round_ties_even() as usize;
 
     // This consumes left_channel and right_channel
-    let mut extended_left = vec![0_f64; half_time_frame]; // Allow half-window at start
-    let mut extended_right = vec![0_f64; half_time_frame];
-    extended_left.extend(left_channel);
-    extended_right.extend(right_channel);
+    let mut pre_extended_left = vec![0_f64; half_time_frame]; // Allow half-window at start
+    let mut pre_extended_right = vec![0_f64; half_time_frame];
+    pre_extended_left.extend(left_channel);
+    pre_extended_right.extend(right_channel);
 
-    // Lots of Vecs are used here to reuse memory space instead of reallocating
-    // For fft_size specifically, there's different opinions online on how much zero-padding is needed
+    // For fft_size, there's different opinions online on how much zero-padding is needed
     let mut fft_size = rounded_time_frame.next_power_of_two(); // Round to next power of 2 for some zero-padding and for a fast FFT
     if (fft_size as f64) < 1.5_f64 * (rounded_time_frame as f64) {
         // Ensure fft_size is at least 150% of rounded_time_frame
         fft_size = fft_size.saturating_mul(2); // Move to the next power of two
     }
-    extended_left.extend(vec![0_f64; fft_size]); // Allow for last FFT chunk to be added
-    extended_left.shrink_to_fit();
-    extended_right.extend(vec![0_f64; fft_size]);
-    extended_right.shrink_to_fit();
+    pre_extended_left.extend(vec![0_f64; fft_size]); // Allow for last FFT chunk to be added
+    pre_extended_right.extend(vec![0_f64; fft_size]);
+    let extended_left = pre_extended_left.into_boxed_slice();
+    let extended_right = pre_extended_right.into_boxed_slice();
     let extended_length = extended_left.len();
+
+    // Lots of Vecs are used here to reuse memory space instead of reallocating
+    // `.into_boxed_slice()` is here to prevent overallocation if it stayed as a Vec
     let r2c = planner.plan_fft_forward(fft_size);
     let c2r = planner.plan_fft_inverse(fft_size);
     let mut left_chunk = Vec::with_capacity(fft_size);
     let mut right_chunk = Vec::with_capacity(fft_size);
-    let mut left_complex = r2c.make_output_vec();
-    left_complex.shrink_to_fit();
-    let mut right_complex = r2c.make_output_vec();
-    right_complex.shrink_to_fit();
-    let mut scratch_complex = r2c.make_scratch_vec();
-    scratch_complex.shrink_to_fit();
-    let mut scratch_real = c2r.make_scratch_vec();
-    scratch_real.shrink_to_fit();
-
+    let mut left_complex = r2c.make_output_vec().into_boxed_slice();
+    let mut right_complex = r2c.make_output_vec().into_boxed_slice();
+    let mut scratch_complex = r2c.make_scratch_vec().into_boxed_slice();
+    let mut scratch_real = c2r.make_scratch_vec().into_boxed_slice();
     let mut holding_left = vec![0_f64; extended_length].into_boxed_slice();
     let mut holding_right = vec![0_f64; extended_length].into_boxed_slice();
     let mut holding_position = 0_usize;
@@ -126,8 +124,10 @@ pub fn overlapping_fft(
 
     // Windows need a bunch of hops
     // Doing more chunks will help with clicking/zipper noise, but will increase runtime
-    let hop_time_frame = 1_f64 / (WINDOW_COSINES.len() as f64 + 1_f64);
-    let hop_size = (time_frame * hop_time_frame).round_ties_even() as usize;
+    // Sorta acts like anti-aliasing in a way
+    // Numerator should be 1_f64 for the mininum amount of overlaps, currently doing 16x
+    let hop_time_frame = 0.0625_f64 / (WINDOW_COSINES.len() as f64 + 1_f64);
+    let hop_size = f64::max((time_frame * hop_time_frame).round_ties_even(), 1.0) as usize;
 
     // Up until the end, which should be basically a half-window
     while holding_position <= usize::strict_sub(extended_length, rounded_time_frame) {
@@ -161,14 +161,19 @@ pub fn overlapping_fft(
         _ = r2c.process_with_scratch(&mut left_chunk, &mut left_complex, &mut scratch_complex);
         _ = r2c.process_with_scratch(&mut right_chunk, &mut right_complex, &mut scratch_complex);
 
-        // Since DC bias is removed, the DC/first/zeroth bin should be near zero and
-        //   it should be fine to manipulate it
-        // Even if it isn't near zero, the value probably spread out to the other bins anyway
-        izip!(left_complex.iter_mut(), right_complex.iter_mut()).for_each(
-            |(left_point, right_point)| {
+        // Remove DC offset for a better overlap
+        if let Some(dc) = left_complex.first_mut() {
+            *dc = Complex::ZERO;
+        }
+        if let Some(dc) = right_complex.first_mut() {
+            *dc = Complex::ZERO;
+        }
+        // Skip first/DC bin
+        izip!(left_complex.iter_mut(), right_complex.iter_mut())
+            .skip(1)
+            .for_each(|(left_point, right_point)| {
                 align(left_point, right_point);
-            },
-        );
+            });
 
         // left_chunk and right_chunk will be overwritten
         _ = c2r.process_with_scratch(&mut left_complex, &mut left_chunk, &mut scratch_real);

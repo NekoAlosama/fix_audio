@@ -1,12 +1,13 @@
 use ebur128::{EbuR128, Mode};
-use itertools::{Itertools as _, izip};
+use itertools::izip;
 use realfft::RealFftPlanner;
 
 use crate::fft;
 
 /// Force minimum reconstructed frequency to `MIN_FREQ` hertz
-/// Thimeo Stereo Tool uses 4096 samples, which is about 11hz between 44.1khz and 48khz audio
-const MIN_FREQ: f64 = 10_f64;
+/// Thimeo Stereo Tool suggests that it uses 4096 samples, which is about 11hz between 44.1khz and 48khz audio
+// For some reason, the 11hz creates smearing here, but not in Stereo Tool?
+const MIN_FREQ: f64 = 20.;
 
 /// 10^(1/20), for `gated_rms()`
 /// `10_f64.powf(loudness * 0.05_f64)` == `LOUDNESS_BASE.powf(loudness)`
@@ -35,7 +36,7 @@ fn remove_dc(channel: &mut [f64]) {
     }
 }
 
-/// All three processing steps into one function
+/// All processing steps into one function
 pub fn process_samples(
     planner: &mut RealFftPlanner<f64>,
     data: (Box<[f64]>, Box<[f64]>),
@@ -56,19 +57,16 @@ pub fn process_samples(
 
     // Average out plain RMS of left and right channels before processing
     // Might help in phase conflicts
-    // Human hearing doesn't matter here
-    let length_recip = 1_f64 / left_channel.len() as f64;
+    // Human hearing doesn't matter here?
     let plain_left_rms = f64::sqrt(
         left_channel
             .iter()
-            .fold(0_f64, |acc, samp| samp.mul_add(*samp, acc))
-            * length_recip,
+            .fold(0_f64, |acc, samp| samp.mul_add(*samp, acc)),
     );
     let plain_right_rms = f64::sqrt(
         right_channel
             .iter()
-            .fold(0_f64, |acc, samp| samp.mul_add(*samp, acc))
-            * length_recip,
+            .fold(0_f64, |acc, samp| samp.mul_add(*samp, acc)),
     );
     let plain_mean_rms = f64::sqrt(plain_left_rms * plain_right_rms);
     let left_mult = plain_mean_rms / plain_left_rms;
@@ -86,7 +84,7 @@ pub fn process_samples(
             oop_counter = oop_counter.saturating_add(1);
         }
     });
-    if oop_counter as f64 >= 0.5_f64 * left_channel.len() as f64 {
+    if oop_counter as f64 > 0.5_f64 * left_channel.len() as f64 {
         right_channel.iter_mut().for_each(|samp| *samp = -*samp);
     }
 
@@ -110,18 +108,6 @@ pub fn process_samples(
         |(left_samp, right_samp)| {
             *left_samp *= processed_left_mult;
             *right_samp *= processed_right_mult;
-        },
-    );
-
-    // Add DC noise to reduce peak levels
-    let (left_min, left_max) = processed_left.iter().minmax().into_option().unwrap();
-    let (right_min, right_max) = processed_right.iter().minmax().into_option().unwrap();
-    let new_left_dc = f64::midpoint(*left_min, *left_max);
-    let new_right_dc = f64::midpoint(*right_min, *right_max);
-    izip!(processed_left.iter_mut(), processed_right.iter_mut()).for_each(
-        |(left_samp, right_samp)| {
-            *left_samp -= new_left_dc;
-            *right_samp -= new_right_dc;
         },
     );
 
