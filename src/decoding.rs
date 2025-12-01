@@ -16,9 +16,9 @@ use symphonia::{
     default,
 };
 
-/// Filler type being used because of a Clippy lint
+/// Filler type being used because of a Clippy lint.
 type SamplesResult = Result<(Box<[f64]>, Box<[f64]>), Error>;
-/// Get samples for a given file using `Symphonia`
+/// Get samples for a given file using `Symphonia`.
 pub fn get_samples(path: &path::PathBuf) -> SamplesResult {
     // Based on `Symphonia`'s docs.rs page and example code (mix of 0.5.4 and dev-0.6)
     // Numbers are from the `Symphonia` basic proceedures in its docs.rs
@@ -83,6 +83,7 @@ pub fn get_samples(path: &path::PathBuf) -> SamplesResult {
         if packet.track_id() == track_id {
             match decoder.decode(&packet) {
                 Ok(audio_buf) => {
+                    // Unsure how to get rid of this statement since it'll be run once, but it might be optimized out
                     if channel_count == 0 {
                         channel_count = audio_buf.num_planes();
 
@@ -101,14 +102,11 @@ pub fn get_samples(path: &path::PathBuf) -> SamplesResult {
                     }
 
                     audio_buf.copy_to_vecs_planar(&mut sample_buf);
+                    // SAFETY: sample_buf has at least one channel
+                    left_samples.extend(unsafe { sample_buf.get_unchecked(0) });
                     match channel_count {
-                        1 => {
-                            // SAFETY: sample_buf has one channel
-                            left_samples.extend(unsafe { sample_buf.get_unchecked(0) });
-                        }
+                        1 => {}
                         2 => {
-                            // SAFETY: sample_buf has two channels
-                            left_samples.extend(unsafe { sample_buf.get_unchecked(0) });
                             // SAFETY: sample_buf has two channels
                             right_samples.extend(unsafe { sample_buf.get_unchecked(1) });
                         }
@@ -146,7 +144,7 @@ pub fn get_samples(path: &path::PathBuf) -> SamplesResult {
     }
 }
 
-/// Get tags and sample rate for a given file using `lofty-rs`
+/// Get tags and sample rate for a given file using `lofty-rs`.
 /// Good to use after using `get_samples()` to verify that audio was found.
 pub fn get_metadata(path: &path::PathBuf) -> (Option<Tag>, u32) {
     let tagged_file = Probe::open(path)

@@ -1,10 +1,10 @@
-/// Decoding module
+/// Decoding module.
 mod decoding;
-/// Exporting module
+/// Exporting module.
 mod exporting;
-/// FFT-specific module for processing.rs
+/// FFT-specific module for processing.rs.
 mod fft;
-/// Processing module
+/// Processing module.
 mod processing;
 
 use std::{
@@ -20,13 +20,13 @@ use symphonia::core::errors::Error;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 // Hard-coded directories
-/// Input directory, created on first run
+/// Input directory, created on first run.
 const INPUT_DIR: &str = "./inputs/";
-/// Output directory
+/// Output directory.
 const OUTPUT_DIR: &str = "./outputs/";
 
-/// Recursive file path retriever from `StackOverflow`
-/// TODO: check if there's a newer std function or crate to do this
+/// Recursive file path retriever from `StackOverflow`.
+/// TODO: check if there's a newer std function or crate to do this.
 fn get_paths(directory: path::PathBuf) -> io::Result<Box<[path::PathBuf]>> {
     let mut entries: Vec<path::PathBuf> = vec![];
     let folder_read = fs::read_dir(directory)?;
@@ -47,7 +47,7 @@ fn get_paths(directory: path::PathBuf) -> io::Result<Box<[path::PathBuf]>> {
     Ok(entries.into_boxed_slice())
 }
 
-/// Main function to execute
+/// Main function to execute.
 fn main() -> Result<(), Error> {
     // Keeping the time for benchmarking
     let time = time::Instant::now();
@@ -72,7 +72,7 @@ fn main() -> Result<(), Error> {
     for entry in entries {
         let stripped_entry = entry.strip_prefix(INPUT_DIR).unwrap();
         println!("Found file: {}", stripped_entry.display());
-        print!("	Decoding...");
+        print!("	Decoding... ");
         io::stdout().flush()?; // Show print instantly
         let mut output_path = path::PathBuf::from(OUTPUT_DIR).join(stripped_entry);
 
@@ -110,19 +110,25 @@ fn main() -> Result<(), Error> {
 
         let (tags, sample_rate) = decoding::get_metadata(&entry);
 
+        print!("(T+{:#?})", time.elapsed());
+        io::stdout().flush()?;
+
         print!("	Processing... ");
         io::stdout().flush()?;
         let modified_audio = processing::process_samples(&mut planner, channels, sample_rate);
+        let modified_tags = processing::process_metadata(tags, &modified_audio);
+        print!("(T+{:#?})", time.elapsed());
+        io::stdout().flush()?;
 
-        print!("	Exporting...");
+        print!("	Exporting... ");
         io::stdout().flush()?;
         output_path.set_extension("wav");
         fs::create_dir_all(output_path.parent().unwrap())?;
         exporting::export_audio(&output_path, modified_audio, sample_rate);
         // Unfortunately doubles Exporting time since `hound` clears all tags when calling `.finalize()`
-        exporting::write_tags(&output_path, tags);
+        exporting::write_tags(&output_path, modified_tags);
 
-        println!("	T+{:#?} ", time.elapsed());
+        println!("(T+{:#?})", time.elapsed());
     }
     Ok(())
 }

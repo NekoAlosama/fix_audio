@@ -1,11 +1,13 @@
 use core::f64::consts::TAU;
+use std::sync::Mutex;
 
 use itertools::izip;
+use rayon::iter::{IndexedParallelIterator as _, IntoParallelIterator as _, ParallelIterator as _};
 use realfft::{RealFftPlanner, num_complex::Complex};
 
-/// List of cosine coefficients of window function
+/// List of cosine coefficients of window function.
 ///
-/// Taken from <https://holometer.fnal.gov/GH_FFT.pdf>
+/// Taken from <https://holometer.fnal.gov/GH_FFT.pdf>.
 // Ideal candidate is HFT144D, a flat top window which needs 7 overlaps and has a noise floor of -144.1dB, enough for the humman auditory system
 // The bandwidth of the main lobe doesn't seem to matter for some reason
 const WINDOW_COSINES: [(f64, f64); 6] = [
@@ -24,6 +26,7 @@ fn window(time_frame: usize) -> Box<[f64]> {
     // The actual level of the window doesn't really matter
     // Window selection: minimize side-lobe level, ignore bandwidth of main lobe?
     (0..time_frame)
+        .into_par_iter()
         .map(|n| {
             WINDOW_COSINES
                 .into_iter()
@@ -34,47 +37,65 @@ fn window(time_frame: usize) -> Box<[f64]> {
         .collect()
 }
 
-/// Faster `.norm_sqr()` that uses `mul_add`
-fn norm_squared(complex: &Complex<f64>) -> f64 {
-    f64::mul_add(complex.re, complex.re, complex.im * complex.im)
-}
-
-/// Faster `.is_finite()` that skips NaN check in `num_traits::FloatCore`
-fn is_finite(complex: &Complex<f64>) -> bool {
-    complex.re.abs() < f64::INFINITY && complex.im.abs() < f64::INFINITY
-}
-
-/// Aligns the phase angle of the left and right channels
+/// Aligns the phase angle of the left and right channels.
+/// This attempts to use branchless programming, but benchmarks can't be consistent due to I/O calls.
 #[expect(
     clippy::arithmetic_side_effects,
     reason = "clippy thinks the operations done on Complex<f64> are for integers"
 )]
 fn align(original_left: &mut Complex<f64>, original_right: &mut Complex<f64>) {
     // custom function is used over .hypot() for efficiency
-    let left_norm_sqr = norm_squared(original_left);
-    let right_norm_sqr = norm_squared(original_right);
+    let left_norm_sqr = f64::mul_add(
+        original_left.re,
+        original_left.re,
+        original_left.im * original_left.im,
+    );
+    let right_norm_sqr = f64::mul_add(
+        original_right.re,
+        original_right.re,
+        original_right.im * original_right.im,
+    );
 
-    // This method aligns the quieter channel with the louder channel.
+    // false, then left; true, then right
+    let louder_mask = left_norm_sqr < right_norm_sqr;
+    let louder = usize::from(louder_mask);
+    let quieter = usize::from(!louder_mask);
+    let norm_sqr_branches = [left_norm_sqr, right_norm_sqr];
+    let channel_branches = &mut [original_left, original_right];
+
+    // This method aligns the quieter channel using the louder channel.
     // Mathematically, this seems to minimize the rotation distance needed.
     // Of course, this still creates clicks, but is simpler than the `sum` method
-    if left_norm_sqr < right_norm_sqr {
-        let new_left = *original_right * (left_norm_sqr / right_norm_sqr).sqrt();
-        if is_finite(&new_left) {
-            *original_left = new_left;
-        }
-    }
-    // Implicitly left_norm_sqr >= right_norm_sqr
-    else {
-        let new_right = *original_left * (right_norm_sqr / left_norm_sqr).sqrt();
-        if is_finite(&new_right) {
-            *original_right = new_right;
-        }
-    }
+    // Research note: doing the opposite (aligning the louder using the quieter) maximizes the rotation distance,
+    //   generally increases peak levels and significantly softens/changes the shape of the spectrum
+
+    // Unsafe unwraps are used since this is part of a hot loop
+
+    // SAFETY: already defined
+    let new_quieter_channel = **(unsafe { channel_branches.get_unchecked(louder) })
+    // SAFETY: already defined
+        * (unsafe { norm_sqr_branches.get_unchecked(quieter) }
+    // SAFETY: already defined
+            / unsafe { norm_sqr_branches.get_unchecked(louder) })
+        .sqrt();
+    let is_finite_mask = usize::from(
+        new_quieter_channel.re.abs() < f64::INFINITY
+            && new_quieter_channel.im.abs() < f64::INFINITY,
+    );
+    let new_branches = [
+        // SAFETY: already defined
+        **unsafe { channel_branches.get_unchecked(quieter) },
+        new_quieter_channel,
+    ];
+    // SAFETY: already defined
+    **unsafe { channel_branches.get_unchecked_mut(quieter) } =
+    // SAFETY: already defined
+        *unsafe { new_branches.get_unchecked(is_finite_mask) };
 
     // If no channel was changed, then left_norm_sqr and right_norm_sqr had to be pretty small
 }
 
-/// Specific overlapping
+/// Specific overlapping.
 pub fn overlapping_fft(
     planner: &mut RealFftPlanner<f64>,
     time_frame: f64,
@@ -110,15 +131,10 @@ pub fn overlapping_fft(
     // `.into_boxed_slice()` is here to prevent overallocation if it stayed as a Vec
     let r2c = planner.plan_fft_forward(fft_size);
     let c2r = planner.plan_fft_inverse(fft_size);
-    let mut left_chunk = Vec::with_capacity(fft_size);
-    let mut right_chunk = Vec::with_capacity(fft_size);
-    let mut left_complex = r2c.make_output_vec().into_boxed_slice();
-    let mut right_complex = r2c.make_output_vec().into_boxed_slice();
-    let mut scratch_complex = r2c.make_scratch_vec().into_boxed_slice();
-    let mut scratch_real = c2r.make_scratch_vec().into_boxed_slice();
-    let mut holding_left = vec![0_f64; extended_length].into_boxed_slice();
-    let mut holding_right = vec![0_f64; extended_length].into_boxed_slice();
-    let mut holding_position = 0_usize;
+    let scratch_complex = Mutex::new(r2c.make_scratch_vec().into_boxed_slice());
+    let scratch_real = Mutex::new(c2r.make_scratch_vec().into_boxed_slice());
+    let holding_left = Mutex::new(vec![0_f64; extended_length].into_boxed_slice());
+    let holding_right = Mutex::new(vec![0_f64; extended_length].into_boxed_slice());
 
     let window = window(rounded_time_frame);
 
@@ -130,85 +146,113 @@ pub fn overlapping_fft(
     let hop_size = f64::max((time_frame * hop_time_frame).round_ties_even(), 1.0) as usize;
 
     // Up until the end, which should be basically a half-window
-    while holding_position <= usize::strict_sub(extended_length, rounded_time_frame) {
-        // .copy_from_*() cannot be used here
-        left_chunk.extend(
-            extended_left
+    // Can't use RangeInclusive unfortunately
+    (0..usize::strict_sub(extended_length + 1, rounded_time_frame))
+        .into_par_iter()
+        .step_by(hop_size)
+        .for_each(|holding_position| {
+            // Surprisingly, these don't take much memory per thread
+            let mut left_chunk = extended_left
                 .iter()
                 .skip(holding_position)
-                .take(rounded_time_frame),
-        );
-        right_chunk.extend(
-            extended_right
+                .take(rounded_time_frame)
+                .copied()
+                .collect::<Vec<f64>>();
+            let mut right_chunk = extended_right
                 .iter()
                 .skip(holding_position)
-                .take(rounded_time_frame),
-        );
+                .take(rounded_time_frame)
+                .copied()
+                .collect::<Vec<f64>>();
+            let mut left_complex = r2c.make_output_vec().into_boxed_slice();
+            let mut right_complex = r2c.make_output_vec().into_boxed_slice();
 
-        izip!(
-            left_chunk.iter_mut(),
-            right_chunk.iter_mut(),
-            window.iter().copied()
-        )
-        .for_each(|(left_samp, right_samp, window_mult)| {
-            *left_samp *= window_mult;
-            *right_samp *= window_mult;
-        });
-
-        left_chunk.resize(fft_size, 0_f64);
-        right_chunk.resize(fft_size, 0_f64);
-
-        _ = r2c.process_with_scratch(&mut left_chunk, &mut left_complex, &mut scratch_complex);
-        _ = r2c.process_with_scratch(&mut right_chunk, &mut right_complex, &mut scratch_complex);
-
-        // Remove DC offset for a better overlap
-        if let Some(dc) = left_complex.first_mut() {
-            *dc = Complex::ZERO;
-        }
-        if let Some(dc) = right_complex.first_mut() {
-            *dc = Complex::ZERO;
-        }
-        // Skip first/DC bin
-        izip!(left_complex.iter_mut(), right_complex.iter_mut())
-            .skip(1)
-            .for_each(|(left_point, right_point)| {
-                align(left_point, right_point);
+            izip!(
+                left_chunk.iter_mut(),
+                right_chunk.iter_mut(),
+                window.iter().copied()
+            )
+            .for_each(|(left_samp, right_samp, window_mult)| {
+                *left_samp *= window_mult;
+                *right_samp *= window_mult;
             });
 
-        // left_chunk and right_chunk will be overwritten
-        _ = c2r.process_with_scratch(&mut left_complex, &mut left_chunk, &mut scratch_real);
-        _ = c2r.process_with_scratch(&mut right_complex, &mut right_chunk, &mut scratch_real);
+            left_chunk.resize(fft_size, 0_f64);
+            right_chunk.resize(fft_size, 0_f64);
 
-        // RealFFT, which uses RustFFT, amplifies the signal by fft_size
-        // Normalization happens later in processing.rs
+            _ = r2c.process_with_scratch(
+                &mut left_chunk,
+                &mut left_complex,
+                &mut scratch_complex.lock().unwrap(),
+            );
+            _ = r2c.process_with_scratch(
+                &mut right_chunk,
+                &mut right_complex,
+                &mut scratch_complex.lock().unwrap(),
+            );
 
-        // left_chunk and right_chunk need to be emptied to allow .extend() on the next iteration
-        // Doing .iter() then .clear() is faster than .drain(..)
-        izip!(
-            izip!(holding_left.iter_mut(), holding_right.iter_mut()).skip(holding_position),
-            left_chunk.iter(),
-            right_chunk.iter()
-        )
-        .for_each(|((hold_left, hold_right), left_samp, right_samp)| {
-            *hold_left += left_samp;
-            *hold_right += right_samp;
+            // Remove DC offset for a better overlap
+            // Unsafe being used since this is in a hot loop
+            // SAFETY: at least one bin will exist
+            *(unsafe { left_complex.first_mut().unwrap_unchecked() }) = Complex::ZERO;
+            // SAFETY: at least one bin will exist
+            *(unsafe { right_complex.first_mut().unwrap_unchecked() }) = Complex::ZERO;
+
+            // Skip first/DC bin
+            left_complex
+                .iter_mut()
+                .zip(right_complex.iter_mut())
+                .skip(1)
+                .for_each(|(left_point, right_point)| {
+                    align(left_point, right_point);
+                });
+
+            // left_chunk and right_chunk will be overwritten
+            _ = c2r.process_with_scratch(
+                &mut left_complex,
+                &mut left_chunk,
+                &mut scratch_real.lock().unwrap(),
+            );
+            _ = c2r.process_with_scratch(
+                &mut right_complex,
+                &mut right_chunk,
+                &mut scratch_real.lock().unwrap(),
+            );
+
+            // RealFFT, which uses RustFFT, amplifies the signal by fft_size
+            // Normalization happens later in processing.rs
+
+            holding_left
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .skip(holding_position)
+                .zip(left_chunk)
+                .for_each(|(hold_left, left_samp)| *hold_left += left_samp);
+
+            holding_right
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .skip(holding_position)
+                .zip(right_chunk)
+                .for_each(|(hold_right, right_samp)| *hold_right += right_samp);
         });
-        left_chunk.clear();
-        right_chunk.clear();
-
-        holding_position = usize::strict_add(holding_position, hop_size);
-    }
 
     // Overlap-adding amplifies the signal by (WINDOW_COSINES.len() as f64 + 1_f64) or 1/hop_time_frame
     // Normalization happens later in processing.rs
 
     (
         holding_left
-            .into_iter()
+            .into_inner()
+            .unwrap()
+            .into_iter() // Don't think doing .into_par_iter() does anything
             .skip(half_time_frame)
             .take(original_length)
             .collect(),
         holding_right
+            .into_inner()
+            .unwrap()
             .into_iter()
             .skip(half_time_frame)
             .take(original_length)

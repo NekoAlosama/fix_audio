@@ -31,12 +31,12 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
   * Stereo Tool suggests that it uses ~11hz, but no frequency smearing is detected?
 
 ### Things to do:
+* Find a better profiler or write tests/benchmarks
 * Add option and confirmation to delete input files after processing
 * Improve program efficiency
   * Approximate performance:
-    * High variance due to I/O (disk and RAM), CPU performance should be consistent
-    * \[Removed in order to [focus on research](./research/) above\]
-  * Implement multithreading?
+    * 16 minutes of audio per 1 minute of runtime (1 million samples in 1295.6 seconds)
+  * High variance due to I/O (disk and RAM), CPU performance should be consistent
   * `mimalloc` being used as an alternative allocator. Minor 20MB overallocation and may give better performance on other platforms
   * (Windows only) Set the program's priority class (Idle -> Above Normal) and I/O priority (Normal -> High)
     * Approximate 50% speedup (90s to 60s on an old test suite) using System Informer to apply priorities
@@ -50,4 +50,4 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
 * Make functions generic over floats (allow `f32` or `f64` in case more precision is needed)
   * Considering always using `f64` over `f32` to ensure no quantization noise/imprecision
 
-![flamegraph](flamegraph.svg)
+![performance](./Screenshot%202025-12-01%20134834.png)

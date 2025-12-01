@@ -1,13 +1,12 @@
 use std::path::Path;
 
 use hound::{SampleFormat, WavSpec, WavWriter};
-use itertools::izip;
 use lofty::{
     config::WriteOptions,
-    tag::{ItemKey, Tag, TagExt as _, TagType},
+    tag::{Tag, TagExt as _},
 };
 
-/// Export processed audio to the output using `hound`
+/// Export processed audio to the output using `hound`.
 pub fn export_audio(file_path: &Path, audio: (Box<[f64]>, Box<[f64]>), sample_rate: u32) {
     // TODO: add simple functionality for mono signals?
     let spec = WavSpec {
@@ -18,7 +17,7 @@ pub fn export_audio(file_path: &Path, audio: (Box<[f64]>, Box<[f64]>), sample_ra
     };
     let mut writer = WavWriter::create(file_path, spec).expect("Could not create writer");
 
-    izip!(audio.0.into_iter(), audio.1.into_iter()).for_each(|(left, right)| {
+    audio.0.into_iter().zip(audio.1).for_each(|(left, right)| {
         writer
             .write_sample(left as f32)
             .expect("Could not write sample");
@@ -33,18 +32,7 @@ pub fn export_audio(file_path: &Path, audio: (Box<[f64]>, Box<[f64]>), sample_ra
 /// Requires `export_audio()` to be executed first.
 pub fn write_tags(file_path: &Path, maybe_tags: Option<Tag>) {
     // We don't particularly care if tags are written
-    if let Some(mut tags) = maybe_tags {
-        // For compatibility, all tags are written to WAV as Id3v2.4
-        tags.re_map(TagType::Id3v2);
-
-        // File peak will change due to processing
-        tags.remove_key(&ItemKey::ReplayGainAlbumPeak);
-        tags.remove_key(&ItemKey::ReplayGainTrackPeak);
-
-        // Added due to `.re_map()`
-        tags.remove_key(&ItemKey::EncoderSoftware); // Associates with the "ENCODING SETTINGS" tag lol
-        tags.remove_key(&ItemKey::EncoderSettings);
-
+    if let Some(tags) = maybe_tags {
         _ = tags.save_to_path(file_path, WriteOptions::default());
     }
 }
