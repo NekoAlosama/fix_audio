@@ -35,7 +35,7 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
 * Add option and confirmation to delete input files after processing
 * Improve program efficiency
   * Approximate performance:
-    * 16 minutes of audio per 1 minute of runtime (1 million samples in 1295.6 seconds)
+    * ~16 minutes of audio per 1 minute of runtime (1 billion samples in 1295.6 seconds)
   * High variance due to I/O (disk and RAM), CPU performance should be consistent
   * `mimalloc` being used as an alternative allocator. Minor 20MB overallocation and may give better performance on other platforms
   * (Windows only) Set the program's priority class (Idle -> Above Normal) and I/O priority (Normal -> High)
