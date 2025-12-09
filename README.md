@@ -36,7 +36,8 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
 * Improve program efficiency
   * Approximate performance:
     * ~16 minutes of audio per 1 minute of runtime (1 billion samples in 1295.6 seconds)
-  * High variance due to I/O (disk and RAM), CPU performance should be consistent
+  * High variance due to I/O (disk and RAM)
+  * Possible slowdown due to CPU affinity (`rayon` does not implement CPU pinning or similar)
   * `mimalloc` being used as an alternative allocator. Minor 20MB overallocation and may give better performance on other platforms
   * (Windows only) Set the program's priority class (Idle -> Above Normal) and I/O priority (Normal -> High)
     * Approximate 50% speedup (90s to 60s on an old test suite) using System Informer to apply priorities

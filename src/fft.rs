@@ -56,10 +56,11 @@ fn align(original_left: &mut Complex<f64>, original_right: &mut Complex<f64>) {
         original_right.im * original_right.im,
     );
 
-    // false, then left; true, then right
-    let louder_mask = left_norm_sqr < right_norm_sqr;
-    let louder = usize::from(louder_mask);
-    let quieter = usize::from(!louder_mask);
+    // To attempt a branchless version of this function, we just use a boolean to decide on which channels to use and have each new line be evaluated based on it
+    // louder_mask = 0 means to use the left to overwrite the right, 1 means to use the right to overwrite the left
+    let louder_mask = right_norm_sqr >= left_norm_sqr;
+    let louder = usize::from(louder_mask); // Booleans need to be converted to usize for indexing, so we'll just do this early
+    let quieter = usize::from(!louder_mask); // ^
     let norm_sqr_branches = [left_norm_sqr, right_norm_sqr];
     let channel_branches = &mut [original_left, original_right];
 
@@ -71,6 +72,8 @@ fn align(original_left: &mut Complex<f64>, original_right: &mut Complex<f64>) {
 
     // Unsafe unwraps are used since this is part of a hot loop
 
+    // We will take the louder channel's bin and rescale it to match the magnitude of the quieter channel
+    // i.e. c_2_hat = c_1 * |c_2|/|c_1|
     // SAFETY: already defined
     let new_quieter_channel = **(unsafe { channel_branches.get_unchecked(louder) })
     // SAFETY: already defined
@@ -78,10 +81,14 @@ fn align(original_left: &mut Complex<f64>, original_right: &mut Complex<f64>) {
     // SAFETY: already defined
             / unsafe { norm_sqr_branches.get_unchecked(louder) })
         .sqrt();
+
+    // Even though in the above we are dividing by |c_1|, it could stil be low enough to create NaN if equal to +0.0 or +Inf if subnormal
     let is_finite_mask = usize::from(
         new_quieter_channel.re.abs() < f64::INFINITY
             && new_quieter_channel.im.abs() < f64::INFINITY,
     );
+
+    // Over here, we choose whether to set the quieter channel to the new version, or set it to itself (which is hopefully optimized out either by the compiler or CPU)
     let new_branches = [
         // SAFETY: already defined
         **unsafe { channel_branches.get_unchecked(quieter) },
@@ -213,30 +220,39 @@ pub fn overlapping_fft(
                 &mut left_chunk,
                 &mut scratch_real.lock().unwrap(),
             );
+            drop(left_complex);
             _ = c2r.process_with_scratch(
                 &mut right_complex,
                 &mut right_chunk,
                 &mut scratch_real.lock().unwrap(),
             );
+            drop(right_complex);
 
             // RealFFT, which uses RustFFT, amplifies the signal by fft_size
             // Normalization happens later in processing.rs
 
-            holding_left
-                .lock()
-                .unwrap()
-                .iter_mut()
-                .skip(holding_position)
-                .zip(left_chunk)
-                .for_each(|(hold_left, left_samp)| *hold_left += left_samp);
+            // left_chunk is done first so less time is used locking the mutexes
+            left_chunk
+                .into_iter()
+                .zip(
+                    holding_left
+                        .lock()
+                        .unwrap()
+                        .iter_mut()
+                        .skip(holding_position),
+                )
+                .for_each(|(left_samp, hold_left)| *hold_left += left_samp);
 
-            holding_right
-                .lock()
-                .unwrap()
-                .iter_mut()
-                .skip(holding_position)
-                .zip(right_chunk)
-                .for_each(|(hold_right, right_samp)| *hold_right += right_samp);
+            right_chunk
+                .into_iter()
+                .zip(
+                    holding_right
+                        .lock()
+                        .unwrap()
+                        .iter_mut()
+                        .skip(holding_position),
+                )
+                .for_each(|(right_samp, hold_right)| *hold_right += right_samp);
         });
 
     // Overlap-adding amplifies the signal by (WINDOW_COSINES.len() as f64 + 1_f64) or 1/hop_time_frame

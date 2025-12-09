@@ -1,6 +1,6 @@
 [package]
 name = "fix_audio"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2024"
 
 [dependencies]
@@ -16,7 +16,7 @@ symphonia = { git = "https://github.com/pdeljanov/Symphonia.git", branch = "dev-
 [profile.release]
 opt-level = 3
 lto = true
-incremental = false # Disabled since incremental builds have stopped improving compile times for some reason
+incremental = false # Disable when compiling a final build, enable when compiling test builds
 codegen-units = 1
 debug = false
 panic = "abort"

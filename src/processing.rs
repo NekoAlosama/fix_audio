@@ -136,16 +136,13 @@ pub fn process_metadata(maybe_tags: Option<Tag>, audio: &(Box<[f64]>, Box<[f64]>
         tags.remove_key(&ItemKey::EncoderSoftware); // Associates with the "ENCODING SETTINGS" tag lol
         tags.remove_key(&ItemKey::EncoderSettings);
 
-        // Create a new peak level (not upsampled)
+        // Generate a new peak level (not upsampled)
         let new_peak = audio
             .0
             .par_iter()
-            .zip(audio.1.par_iter())
-            .fold(
-                || f64::NEG_INFINITY,
-                |acc, (left, right)| f64::max(acc, f64::max(left.abs(), right.abs())),
-            )
-            .reduce(|| f64::NEG_INFINITY, f64::max);
+            .chain(audio.1.par_iter())
+            .copied()
+            .reduce(|| f64::NEG_INFINITY, |acc, samp| f64::max(acc, samp.abs()));
         let new_peak_tag = TagItem::new(
             ItemKey::ReplayGainTrackPeak,
             ItemValue::Text((new_peak as f32).to_string()),
