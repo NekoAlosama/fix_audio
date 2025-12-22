@@ -10,7 +10,9 @@ mod processing;
 use std::{
     fs,
     io::{self, Write as _},
-    path, time,
+    path,
+    thread::available_parallelism,
+    time,
 };
 
 use realfft::RealFftPlanner;
@@ -49,6 +51,18 @@ fn get_paths(directory: path::PathBuf) -> io::Result<Box<[path::PathBuf]>> {
 
 /// Main function to execute.
 fn main() -> Result<(), Error> {
+    // Ensure that 1 or 2 CPU cores are unused to not lock up the system while the user is doing something else
+    rayon::ThreadPoolBuilder::new()
+        .num_threads({
+            let local_threads = usize::from(available_parallelism().unwrap()); // Cannot use rayon::current_num_threads() since that will initialize early
+            match local_threads {
+                1 | 2 => 1, // If your system has two cores, use 1 core to process; if your system has 1 core, use the only core there to process
+                _ => local_threads.strict_sub(2),
+            }
+        })
+        .build_global()
+        .unwrap();
+
     // Keeping the time for benchmarking
     let time = time::Instant::now();
 
@@ -68,6 +82,7 @@ fn main() -> Result<(), Error> {
     let entries = get_paths(INPUT_DIR.into())?;
 
     let mut planner = RealFftPlanner::new();
+
     println!("Setup and file-exploring time: {:#?}", time.elapsed());
     for entry in entries {
         let stripped_entry = entry.strip_prefix(INPUT_DIR).unwrap();

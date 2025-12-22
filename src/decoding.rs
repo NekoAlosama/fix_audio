@@ -151,10 +151,14 @@ pub fn get_metadata(path: &path::PathBuf) -> (Option<Tag>, u32) {
         .expect("ERROR: file removed")
         .read()
         .expect("ERROR: file in use");
-    let mut tags = tagged_file.primary_tag().cloned();
-    if tags.is_none() {
-        tags = tagged_file.first_tag().cloned();
-    }
+    let tags = {
+        let tag_attempt = tagged_file.primary_tag().cloned();
+        if tag_attempt.is_some() {
+            tag_attempt
+        } else {
+            tagged_file.first_tag().cloned()
+        }
+    };
     let sample_rate = tagged_file
         .properties()
         .sample_rate()

@@ -18,6 +18,10 @@ pub fn export_audio(file_path: &Path, audio: (Box<[f64]>, Box<[f64]>), sample_ra
     let mut writer = WavWriter::create(file_path, spec).expect("Could not create writer");
 
     audio.0.into_iter().zip(audio.1).for_each(|(left, right)| {
+        debug_assert!(
+            left.is_finite() && right.is_finite(),
+            "Inf or NaN value detected"
+        );
         writer
             .write_sample(left as f32)
             .expect("Could not write sample");

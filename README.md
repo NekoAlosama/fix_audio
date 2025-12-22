@@ -25,20 +25,19 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
     * .mp3 files: does not support invalid CRC checksums, so output files will have added silence
 * FFT alignment algorithm produces issues
   * [Research is ongoing](./research/)
-* FFT does not preserve the shape of waveforms below 20hz
+* FFT does not exactly preserve the shape of waveforms below 20hz
   * Side effect: FFT produces relatively minor frequency smearing / pre-echo depending on chosen frequency
     * Mainly affects very short hi-hats and sounds delayed in one channel
   * Stereo Tool suggests that it uses ~11hz, but no frequency smearing is detected?
 
 ### Things to do:
-* Find a better profiler or write tests/benchmarks
+* Find a better profiler and write tests/benchmarks
 * Add option and confirmation to delete input files after processing
 * Improve program efficiency
   * Approximate performance:
-    * ~16 minutes of audio per 1 minute of runtime (1 billion samples in 1295.6 seconds)
-  * High variance due to I/O (disk and RAM)
-  * Possible slowdown due to CPU affinity (`rayon` does not implement CPU pinning or similar)
-  * `mimalloc` being used as an alternative allocator. Minor 20MB overallocation and may give better performance on other platforms
+    * about 2.08 minutes of runtime per 1 hour of 44.1khz audio (298 seconds to process 379 million samples)
+  * Possible slowdown due to CPU affinity (`rayon` does not implement CPU pinning or similar) or other applications
+  * `mimalloc` being used as an alternative allocator. Minor overallocation and may give better performance on other platforms
   * (Windows only) Set the program's priority class (Idle -> Above Normal) and I/O priority (Normal -> High)
     * Approximate 50% speedup (90s to 60s on an old test suite) using System Informer to apply priorities
   * Add shortcut for mono files (remove DC noise only)
@@ -51,4 +50,4 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
 * Make functions generic over floats (allow `f32` or `f64` in case more precision is needed)
   * Considering always using `f64` over `f32` to ensure no quantization noise/imprecision
 
-![performance](./Screenshot%202025-12-01%20134834.png)
+![performance](./Screenshot%202025-12-21%20205638.png)
