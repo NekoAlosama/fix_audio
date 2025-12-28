@@ -17,22 +17,36 @@ const MIN_FREQ: f64 = 20.;
 /// `10_f64.powf(loudness * 0.05_f64)` == `LOUDNESS_BASE.powf(loudness)`.
 const LOUDNESS_BASE: f64 = 1.122_018_454_301_963_3_f64;
 
+/// Filler type being used because of a Clippy lint.
+pub type AudioPeak = ((Box<[f32]>, Box<[f32]>), f32);
+
 /// EBU R 128 Integrated Loudness calculation.
 /// Basically a two-pass windowed RMS.
 ///   First pass is used to detect and ignore silence at -70dB.
 ///   Second pass is used to detect and ignore audio that's 10dB below the first-pass result.
 fn gated_rms(samples: &[f64], sample_rate: u32) -> f64 {
-    let mut ebur128 = EbuR128::new(1_u32, sample_rate, Mode::I).expect("Shouldn't happen");
+    let mut ebur128 = EbuR128::new(1_u32, sample_rate, Mode::I)
+        .expect("Sample rate greater than 2.8224Mhz for some reason");
     // .add_frames_f64_planar() sucks since it requires an array of channel arrays, so for one channel, it needs an array around it
+    // Result is dropped since it'll only panic if channels == 0, which does not happen above
     _ = ebur128.add_frames_f64(samples);
-    let loudness = ebur128.loudness_global().expect("Shouldn't happen");
+    // SAFETY: `loudness_global()` panics if not using Mode::I, which we are doing above
+    let loudness_db = unsafe { ebur128.loudness_global().unwrap_unchecked() };
 
-    LOUDNESS_BASE.powf(loudness)
+    LOUDNESS_BASE.powf(loudness_db)
 }
 
 /// Plain DC removal.
 /// A high-pass filter isn't being used here in order to preserve the shape of the waveform.
-fn remove_dc(channel: &mut [f64]) {
+#[expect(clippy::needless_for_each, reason = "for parity with `par_remove_dc`")]
+pub fn plain_remove_dc(channel: &mut [f64]) {
+    let length = channel.len() as f64;
+    let dc = channel.iter().sum::<f64>() / length;
+    channel.iter_mut().for_each(|samp| *samp -= dc);
+}
+
+/// Parallel version of `plain_remove_dc()` if it's called when the thread pool is open.
+pub fn par_remove_dc(channel: &mut [f64]) {
     let length = channel.len() as f64;
     let dc = channel.par_iter().sum::<f64>() / length;
     channel.par_iter_mut().for_each(|samp| *samp -= dc);
@@ -40,17 +54,17 @@ fn remove_dc(channel: &mut [f64]) {
 
 /// All processing steps into one function.
 pub fn process_samples(
-    planner: &mut RealFftPlanner<f64>,
+    realfft_planner: &mut RealFftPlanner<f64>,
     data: (Box<[f64]>, Box<[f64]>),
     sample_rate: u32,
-) -> (Box<[f64]>, Box<[f64]>) {
+) -> AudioPeak {
     let mut left_channel = data.0;
     let mut right_channel = data.1;
 
     // Remove DC before processing
     // DC might affect magnitude of `MIN_FREQ` Hz and interpolated values close to it
-    remove_dc(&mut left_channel);
-    remove_dc(&mut right_channel);
+    par_remove_dc(&mut left_channel);
+    par_remove_dc(&mut right_channel);
 
     // Integrated Loudness shouldn't be affected by DC noise, but this is placed after DC removal just in case
     let true_left_rms = gated_rms(&left_channel, sample_rate);
@@ -96,12 +110,12 @@ pub fn process_samples(
 
     let time_frame = f64::from(sample_rate) / MIN_FREQ; // actually in number of samples
     let (mut processed_left, mut processed_right) =
-        fft::overlapping_fft(planner, time_frame, left_channel, right_channel);
+        fft::overlapping_fft(realfft_planner, time_frame, left_channel, right_channel);
 
     // STFT will generate sub-MIN_FREQ noise
     // As such, DC noise is likely added and should be removed since we'll multiply the signals later
-    remove_dc(&mut processed_left);
-    remove_dc(&mut processed_right);
+    par_remove_dc(&mut processed_left);
+    par_remove_dc(&mut processed_right);
 
     // Average out the loudness of the left and right channels
     // This handles amplification by RustFFT and overlap-adding, assuming there isn't much precision loss
@@ -118,12 +132,13 @@ pub fn process_samples(
             *right_samp *= processed_right_mult;
         });
 
-    // Overall processing is done
-    (processed_left, processed_right)
+    // Rotating the phase of a signal should not (significantly) change the observed RMS and integrated loudness
+    // Since the following function converts the signal to f32 to save on memory, we can just return the result
+    fft::minimize_peak(processed_left, processed_right)
 }
 
 /// Modify tags to remove outdated info.
-pub fn process_metadata(maybe_tags: Option<Tag>, audio: &(Box<[f64]>, Box<[f64]>)) -> Option<Tag> {
+pub fn process_metadata(maybe_tags: Option<Tag>, peak: f32) -> Option<Tag> {
     // We don't particularly care if tags are written
     if let Some(mut tags) = maybe_tags {
         // For compatibility, all tags are written to WAV as Id3v2.4
@@ -136,16 +151,10 @@ pub fn process_metadata(maybe_tags: Option<Tag>, audio: &(Box<[f64]>, Box<[f64]>
         tags.remove_key(&ItemKey::EncoderSoftware); // Associates with the "ENCODING SETTINGS" tag lol
         tags.remove_key(&ItemKey::EncoderSettings);
 
-        // Generate a new peak level (not upsampled)
-        let new_peak = audio
-            .0
-            .par_iter()
-            .chain(audio.1.par_iter())
-            .copied()
-            .reduce(|| f64::NEG_INFINITY, |acc, samp| f64::max(acc, samp.abs()));
+        // Paste the new peak value
         let new_peak_tag = TagItem::new(
             ItemKey::ReplayGainTrackPeak,
-            ItemValue::Text((new_peak as f32).to_string()),
+            ItemValue::Text(peak.to_string()),
         );
         tags.insert(new_peak_tag);
 

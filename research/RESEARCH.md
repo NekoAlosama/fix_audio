@@ -32,7 +32,7 @@ I think I may need outside help with this problem. I encourage someone out there
 * __High peak in certain songs:__ DJ Screw's "Backstreets (Screwed)" has a high peak level of 10.04dB with `fix_audio` compared to 3.65dB with WatchCat.
   * Sample files are marked `21`, `22`, and `23`; reduced to the last 30 seconds
   * The peak level does not significantly change when using different window functions or when increasing the number of overlaps
-  * It would be possible to rotate the phase of the whole song and find an angle which reduces the overall peak level, but it could be slow to process (e.g. try -90-degree to 90-degree rotations with 1-degree increments). Plus, it treats a symptom, not the cause.
+  * Currently, the project tries to rotate the final result to reduce peak levels, making this sample file slightly outdated. However, this treats the symptom, not the cause.
   * Implies some sort of fundamental difference between the `fix_audio` algorithm and the Stereo Tool algorithm
 * __Lack of partial alignment:__ `Image phase amplifier: 0%` to `Image phase amplifier: 200%` is possible in Stereo Tool, but this projects essentially implements `Image phase amplifier: 0%` only. For correctness, multiple passes through `Image phase amplifier: 50%` and its equivalent for this project should eventually converge to using `Image phase amplifier: 0%` once, where this operation is idempotent.
   * The current `align()` function could be modified to allow partial alignment if all of the phase angles are calculated using `Complex::arg()`, but this might be too slow.

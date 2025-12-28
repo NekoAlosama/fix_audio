@@ -8,6 +8,11 @@ Currently, this program takes in stereo audio files (input folder created on fir
   * Use case: switching between a mono speaker to a car stereo
     * Prevents per-frequency phase cancellation for a better downmix to mono
     * Heavily reduces the perceived stereo width, but instrument placement / channel-specific sounds are preserved
+* Rotates the phase of the result from the above step
+  * Concept based on iZotope RX 11's "Phase" module, can't be automated
+  * Use case: Reduce signal peak levels, especially ones amplified due to the above step
+    * RX 11's algorithm usually increases peak levels for no good reason
+    * May be removed if the alignment algorithm is changed to one that inherently produces lower signal levels, making this step redundant
 * Averages the loudness of the left and right channel
   * Concept based on iZotope RX 11's "Azimuth" module, can't be automated
   * Use case: ensure that one channel doesn't overpower the other over the course of a track
@@ -31,11 +36,13 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
   * Stereo Tool suggests that it uses ~11hz, but no frequency smearing is detected?
 
 ### Things to do:
-* Find a better profiler and write tests/benchmarks
 * Add option and confirmation to delete input files after processing
 * Improve program efficiency
   * Approximate performance:
-    * about 2.08 minutes of runtime per 1 hour of 44.1khz audio (298 seconds to process 379 million samples)
+    * about 2.87 minutes of runtime per 1 hour of 44.1khz audio (32.3 minutes to process 11.25 hours of music (1.79 billion samples))
+  * Reduce memory usage
+    * Seems like there's hidden clones/duplicates? Unsure if it's just bad logic on my part or my dependencies. Clippy isn't saying much in this regard.
+    * Need a memory profiler
   * Possible slowdown due to CPU affinity (`rayon` does not implement CPU pinning or similar) or other applications
   * `mimalloc` being used as an alternative allocator. Minor overallocation and may give better performance on other platforms
   * (Windows only) Set the program's priority class (Idle -> Above Normal) and I/O priority (Normal -> High)

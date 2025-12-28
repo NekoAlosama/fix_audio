@@ -1,3 +1,4 @@
+use core::hint;
 use std::{fs, path};
 
 use lofty::{
@@ -102,16 +103,17 @@ pub fn get_samples(path: &path::PathBuf) -> SamplesResult {
                     }
 
                     audio_buf.copy_to_vecs_planar(&mut sample_buf);
-                    // SAFETY: sample_buf has at least one channel
-                    left_samples.extend(unsafe { sample_buf.get_unchecked(0) });
+                    left_samples.extend(&sample_buf[0]);
                     match channel_count {
                         1 => {}
                         2 => {
-                            // SAFETY: sample_buf has two channels
-                            right_samples.extend(unsafe { sample_buf.get_unchecked(1) });
+                            right_samples.extend(&sample_buf[1]);
                         }
                         _ => {
-                            unreachable!();
+                            // SAFETY: channel count can only be 1 or 2
+                            unsafe {
+                                hint::unreachable_unchecked();
+                            }
                         }
                     }
                 }
@@ -148,7 +150,7 @@ pub fn get_samples(path: &path::PathBuf) -> SamplesResult {
 /// Good to use after using `get_samples()` to verify that audio was found.
 pub fn get_metadata(path: &path::PathBuf) -> (Option<Tag>, u32) {
     let tagged_file = Probe::open(path)
-        .expect("ERROR: file removed")
+        .expect("ERROR: file removed before processing")
         .read()
         .expect("ERROR: file in use");
     let tags = {
