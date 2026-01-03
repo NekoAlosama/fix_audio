@@ -5,8 +5,8 @@ use core::{
 use std::sync::Mutex;
 
 use rayon::iter::{
-    IndexedParallelIterator as _, IntoParallelIterator as _, IntoParallelRefIterator as _,
-    IntoParallelRefMutIterator as _, ParallelIterator as _,
+    IndexedParallelIterator as _, IntoParallelIterator as _, IntoParallelRefMutIterator as _,
+    ParallelIterator as _,
 };
 use realfft::{RealFftPlanner, num_complex::Complex};
 use rustfft::FftPlanner;
@@ -267,8 +267,7 @@ pub fn overlapping_fft(
 }
 
 /// Minimize peaks by interpreting the analytic signal as a polygon and finding the rotating angle that will minimize the width on the real axis.
-/// Unfortunately also makes the track `ReplayGain` slightly inaccurate (usually no change, but sometimes 0.15dB change or less).
-// Memory usage: eight(!!!) times the size of the output (f64 import -> f32+f32 modification (should be same size as import) and either the iters or par_iter are increasing the memory -> f32 export)
+// Memory usage: six-to-eight(!!!) times the size of the output (f64 import -> f32+f32 modification (should be same size as import) and either the iters or par_iter are increasing the memory -> f32 export)
 // Luckily faster than STFT above, but can still crash a system
 #[expect(
     clippy::arithmetic_side_effects,
@@ -279,23 +278,26 @@ pub fn minimize_peak(left_channel: Box<[f64]>, right_channel: Box<[f64]>) -> pro
 
     // Get an analytic version of the signal so it's easier to rotate
     // Takes a lot of memory for no good reason
+    // We have to renormalize everything since we already did that in the previous processing.rs step (unless I want to do it again?)
     let (analytic_left, analytic_right) = {
         // The planner has an internal cache. However, this cache would be very large if a long song is added as input, and it is never shrunk.
         let fft_size = get_fft_size(original_length);
         let half_fft_size = ((fft_size as f64) * 0.5).round_ties_even() as usize;
 
         // Multiply by 2 to account for Hilbert transform / folding negative freqs to real freqs
+        // Also pre-normalize since this will usually cause problems in the f32 area
         // Also convert to f32 to reduce memory usage
+        let fft_norm = (fft_size as f64).recip();
         let mut extended_left = left_channel
             .into_iter()
-            .map(|samp| Complex::new((2_f64 * samp) as f32, 0_f32))
-            .chain(once(Complex::ZERO).cycle())
+            .map(|samp| Complex::new(((samp + samp) * fft_norm) as f32, 0_f32))
+            .cycle() // Pad signal by cycling it
             .take(fft_size)
             .collect::<Box<_>>();
         let mut extended_right = right_channel
             .into_iter()
-            .map(|samp| Complex::new((2_f64 * samp) as f32, 0_f32))
-            .chain(once(Complex::ZERO).cycle())
+            .map(|samp| Complex::new(((samp + samp) * fft_norm) as f32, 0_f32))
+            .cycle()
             .take(fft_size)
             .collect::<Box<_>>();
 
@@ -323,86 +325,84 @@ pub fn minimize_peak(left_channel: Box<[f64]>, right_channel: Box<[f64]>) -> pro
         drop(rustfft_planner);
         drop(scratch);
 
-        // Might not be worth making a new function to remove both real and imaginary DC noise
+        // Discard FFT padding
+        extended_left = extended_left
+            .into_par_iter()
+            .take(original_length)
+            .collect();
+        extended_right = extended_right
+            .into_par_iter()
+            .take(original_length)
+            .collect();
 
-        // Account for FFT amplification and rotate to the highest positive peak level
-        // That second part is to make sure that the samples later are definitely lower than this peak level
-        let multiplier = {
-            let (max_angle, max_mag) = extended_left
-                .par_iter()
-                .chain(extended_right.par_iter())
-                .fold(
-                    || (Complex::<f32>::ZERO, f32::NEG_INFINITY),
-                    |acc, point| {
-                        let mag = f32::mul_add(point.re, point.re, point.im * point.im);
-                        if mag > acc.1 { (*point, mag) } else { acc }
-                    },
-                )
-                .reduce(
-                    || (Complex::<f32>::ZERO, f32::NEG_INFINITY),
-                    |acc, point_mag| {
-                        if point_mag.1 > acc.1 { point_mag } else { acc }
-                    },
-                );
-            Complex::new(max_angle.re, -max_angle.im)
-                * (((fft_size as f64).recip() as f32) / max_mag.sqrt())
-        };
-        (
-            extended_left
-                .into_par_iter()
-                .take(original_length)
-                .map(|point| point * multiplier)
-                .collect::<Box<_>>(),
-            extended_right
-                .into_par_iter()
-                .take(original_length)
-                .map(|point| point * multiplier)
-                .collect::<Box<_>>(),
-        )
+        // Remove real and imaginary DC noise by making the sum of each equal zero
+        // i.e. sum of extended_left == Complex::ZERO
+        let mut left_sum = Complex::<f64>::ZERO;
+        let mut right_sum = Complex::<f64>::ZERO;
+        let original_len_recip = (original_length as f64).recip();
+        extended_left
+            .iter()
+            .zip(extended_right.iter())
+            .for_each(|(left, right)| {
+                left_sum.re += f64::from(left.re);
+                left_sum.im += f64::from(left.im);
+                right_sum.re += f64::from(right.re);
+                right_sum.im += f64::from(right.im);
+            });
+        let left_mean = left_sum * original_len_recip;
+        let right_mean = right_sum * original_len_recip;
+        let left_mean_f32 = Complex::new(left_mean.re as f32, left_mean.im as f32);
+        let right_mean_f32 = Complex::new(right_mean.re as f32, right_mean.im as f32);
+        extended_left
+            .iter_mut()
+            .zip(extended_right.iter_mut())
+            .for_each(|(left, right)| {
+                *left -= left_mean_f32;
+                *right -= right_mean_f32;
+            });
+
+        (extended_left, extended_right)
     };
 
     // Since the multiplications take a long time to compute, the best way for me to get a good estimate would be by sampling in fixed intervals.
-    // 1 to 15 since 0 or 16 will be the original level.
+    // 1 to 31 since 0 or 32 will be the original level.
     // Seems good enough, actual best peak value is probably lower by 0.5dB or less
-    let (saved_angle, saved_peak) = (1_i32..16_i32)
-        .into_par_iter()
-        .fold(
-            || (Complex::new(1_f32, 0_f32), f32::INFINITY),
-            |acc, angle_portion| {
-                // Negative sine angle to drop the imaginary component
-                let complex_angle = {
-                    let (sine, cosine) = f64::sin_cos(f64::from(angle_portion) * PI / 16_f64);
-                    Complex::new(cosine as f32, -sine as f32)
-                };
-                let peak = analytic_left.iter().chain(analytic_right.iter()).fold(
-                    f32::NEG_INFINITY,
-                    |local_acc, point| {
-                        f32::max(
-                            local_acc,
-                            point
-                                .re
-                                .mul_add(complex_angle.re, point.im * complex_angle.im)
-                                .abs(),
-                        )
-                    },
-                );
-                if peak < acc.1 {
-                    (complex_angle, peak)
-                } else {
-                    acc
-                }
-            },
-        )
-        .reduce(
-            || (Complex::new(1_f32, 0_f32), f32::INFINITY),
-            |acc, partial_result| {
-                if partial_result.1 < acc.1 {
-                    partial_result
-                } else {
-                    acc
-                }
-            },
-        );
+    // Unfortunately also makes the track `ReplayGain` slightly inaccurate (usually no change, but sometimes 0.15dB change or less).
+    // No idea why this happens, but it could just be that the EBU R 128 loudness estimate does change with phase rotations.
+    let mut saved_angle = Complex::new(1_f32, 0_f32);
+    let mut saved_peak = analytic_left
+        .iter()
+        .chain(analytic_right.iter())
+        .fold(f32::NEG_INFINITY, |acc, point| {
+            f32::max(acc, point.re.abs())
+        });
+    let candidate_angle = (1_i32..=31_i32).map(|numerator| {
+        let (sine, cosine) = f64::sin_cos(f64::from(numerator) * PI / 32_f64);
+        Complex::new(cosine as f32, -sine as f32)
+    });
+    // Short-circuting loop
+    for test_angle in candidate_angle {
+        let mut good_angle = true;
+        let mut local_max_peak = f32::NEG_INFINITY;
+        for point in analytic_left.iter().chain(analytic_right.iter()) {
+            let point_peak = point
+                .re
+                .mul_add(test_angle.re, point.im * test_angle.im)
+                .abs();
+            if point_peak > saved_peak {
+                good_angle = false;
+                break;
+            } else if point_peak > local_max_peak {
+                local_max_peak = point_peak;
+            } else {
+                // point_peak wasn't that high, no reason to save it
+            }
+        }
+        if good_angle {
+            saved_angle = test_angle;
+            saved_peak = local_max_peak;
+        }
+    }
 
     (
         (

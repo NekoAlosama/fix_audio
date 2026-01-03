@@ -39,7 +39,7 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
 * Add option and confirmation to delete input files after processing
 * Improve program efficiency
   * Approximate performance:
-    * about 2.87 minutes of runtime per 1 hour of 44.1khz audio (32.3 minutes to process 11.25 hours of music (1.79 billion samples))
+    * about 2.41 minutes of runtime per 1 hour of 44.1khz audio (5.15 minutes to process 2.14 hours of music (339 million samples))
   * Reduce memory usage
     * Seems like there's hidden clones/duplicates? Unsure if it's just bad logic on my part or my dependencies. Clippy isn't saying much in this regard.
     * Need a memory profiler
