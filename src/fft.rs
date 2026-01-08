@@ -4,12 +4,8 @@ use core::{
 };
 use std::sync::Mutex;
 
-use rayon::iter::{
-    IndexedParallelIterator as _, IntoParallelIterator as _, IntoParallelRefMutIterator as _,
-    ParallelIterator as _,
-};
+use rayon::iter::{IntoParallelIterator as _, ParallelIterator as _};
 use realfft::{RealFftPlanner, num_complex::Complex};
-use rustfft::FftPlanner;
 
 use crate::processing;
 
@@ -53,12 +49,8 @@ fn get_fft_size(length: usize) -> usize {
 
     let float_length = length as f64;
     let pow_of_2 = float_length.log2().ceil().exp2().round_ties_even();
-    let pow_of_3 = (ln_3 * f64::ceil(float_length.ln() / ln_3))
-        .exp()
-        .round_ties_even();
-    let pow_of_6 = (ln_6 * f64::ceil(float_length.ln() / ln_6))
-        .exp()
-        .round_ties_even();
+    let pow_of_3 = 3_f64.powi(f64::ceil(float_length.ln() / ln_3) as i32);
+    let pow_of_6 = 6_f64.powi(f64::ceil(float_length.ln() / ln_6) as i32);
 
     pow_of_2.min(pow_of_3).min(pow_of_6) as usize
 }
@@ -267,102 +259,96 @@ pub fn overlapping_fft(
 }
 
 /// Minimize peaks by interpreting the analytic signal as a polygon and finding the rotating angle that will minimize the width on the real axis.
-// Memory usage: six-to-eight(!!!) times the size of the output (f64 import -> f32+f32 modification (should be same size as import) and either the iters or par_iter are increasing the memory -> f32 export)
-// Luckily faster than STFT above, but can still crash a system
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "clippy thinks the operations done on Complex<f64> are for integers"
-)]
+// Memory usage: a bit more than STFT's usage
+// Luckily faster than STFT above
 pub fn minimize_peak(left_channel: Box<[f64]>, right_channel: Box<[f64]>) -> processing::AudioPeak {
-    let original_length = left_channel.len();
+    let f32_left_channel;
+    let f32_right_channel;
 
-    // Get an analytic version of the signal so it's easier to rotate
-    // Takes a lot of memory for no good reason
+    // Get a 90-degree rotated version of the audio signal to make it easier to rotate
     // We have to renormalize everything since we already did that in the previous processing.rs step (unless I want to do it again?)
-    let (analytic_left, analytic_right) = {
-        // The planner has an internal cache. However, this cache would be very large if a long song is added as input, and it is never shrunk.
+    let (f32_rotated_left, f32_rotated_right) = {
+        let original_length = left_channel.len();
         let fft_size = get_fft_size(original_length);
-        let half_fft_size = ((fft_size as f64) * 0.5).round_ties_even() as usize;
+        // The planner has an internal cache to store different FFT sizes. This makes sense for reusing songs with the same sample rate as in the STFT,
+        //   but each song probably have different lengths to each other, so it's more efficient to make a specific FFT planner for each song
+        let mut long_realfft_planner = RealFftPlanner::new();
+        let r2c = long_realfft_planner.plan_fft_forward(fft_size);
+        let c2r = long_realfft_planner.plan_fft_inverse(fft_size);
+        let mut scratch = c2r.make_scratch_vec().into_boxed_slice();
 
-        // Multiply by 2 to account for Hilbert transform / folding negative freqs to real freqs
-        // Also pre-normalize since this will usually cause problems in the f32 area
         // Also convert to f32 to reduce memory usage
+        // Also pre-normalize since this will usually cause problems in the f32 area
         let fft_norm = (fft_size as f64).recip();
-        let mut extended_left = left_channel
-            .into_iter()
-            .map(|samp| Complex::new(((samp + samp) * fft_norm) as f32, 0_f32))
-            .cycle() // Pad signal by cycling it
-            .take(fft_size)
-            .collect::<Box<_>>();
-        let mut extended_right = right_channel
-            .into_iter()
-            .map(|samp| Complex::new(((samp + samp) * fft_norm) as f32, 0_f32))
-            .cycle()
-            .take(fft_size)
-            .collect::<Box<_>>();
 
-        let mut scratch = vec![Complex::ZERO; fft_size].into_boxed_slice();
-        let mut rustfft_planner = FftPlanner::new();
-        let r2c = rustfft_planner.plan_fft_forward(fft_size);
-        r2c.process_with_scratch(&mut extended_left, &mut scratch);
-        r2c.process_with_scratch(&mut extended_right, &mut scratch);
-        drop(r2c);
+        // Might be able to reduce these to a function
+        let rotated_left = {
+            let mut left_complex = r2c.make_output_vec().into_boxed_slice();
+            _ = r2c.process_with_scratch(
+                &mut left_channel
+                    .iter()
+                    .cycle() // Pad signal by cycling it
+                    .take(fft_size)
+                    .map(|samp| (samp * fft_norm) as f32)
+                    .collect::<Box<_>>(),
+                &mut left_complex,
+                &mut scratch,
+            );
+            f32_left_channel = left_channel
+                .into_iter()
+                .map(|samp| samp as f32)
+                .collect::<Box<_>>();
 
-        // Remove local DC noise
-        extended_left[0] = Complex::ZERO;
-        extended_right[0] = Complex::ZERO;
+            left_complex
+                .iter_mut()
+                .for_each(|point| *point = Complex::new(-point.im, point.re)); // Equivalent to multiplying by i
+            let mut finished_left = c2r.make_output_vec().into_boxed_slice();
+            _ = c2r.process_with_scratch(&mut left_complex, &mut finished_left, &mut scratch);
+            finished_left
+                .into_iter()
+                .take(original_length)
+                .collect::<Box<_>>()
+        };
+        let rotated_right = {
+            let mut right_complex = r2c.make_output_vec().into_boxed_slice();
+            _ = r2c.process_with_scratch(
+                &mut right_channel
+                    .iter()
+                    .cycle() // Pad signal by cycling it
+                    .take(fft_size)
+                    .map(|samp| (samp * fft_norm) as f32)
+                    .collect::<Box<_>>(),
+                &mut right_complex,
+                &mut scratch,
+            );
+            f32_right_channel = right_channel
+                .into_iter()
+                .map(|samp| samp as f32)
+                .collect::<Box<_>>();
 
-        // `fft_size` might be odd, but it probably doesn't matter here
-        extended_left
-            .par_iter_mut()
-            .skip(half_fft_size)
-            .chain(extended_right.par_iter_mut().skip(half_fft_size))
-            .for_each(|point| *point = Complex::ZERO);
-        let c2r = rustfft_planner.plan_fft_inverse(fft_size);
-        c2r.process_with_scratch(&mut extended_left, &mut scratch);
-        c2r.process_with_scratch(&mut extended_right, &mut scratch);
-        drop(c2r);
-        drop(rustfft_planner);
-        drop(scratch);
-
-        // Discard FFT padding
-        extended_left = extended_left
-            .into_par_iter()
-            .take(original_length)
-            .collect();
-        extended_right = extended_right
-            .into_par_iter()
-            .take(original_length)
-            .collect();
-
-        // Remove real and imaginary DC noise by making the sum of each equal zero
-        // i.e. sum of extended_left == Complex::ZERO
-        let mut left_sum = Complex::<f64>::ZERO;
-        let mut right_sum = Complex::<f64>::ZERO;
-        let original_len_recip = (original_length as f64).recip();
-        extended_left
-            .iter()
-            .zip(extended_right.iter())
-            .for_each(|(left, right)| {
-                left_sum.re += f64::from(left.re);
-                left_sum.im += f64::from(left.im);
-                right_sum.re += f64::from(right.re);
-                right_sum.im += f64::from(right.im);
-            });
-        let left_mean = left_sum * original_len_recip;
-        let right_mean = right_sum * original_len_recip;
-        let left_mean_f32 = Complex::new(left_mean.re as f32, left_mean.im as f32);
-        let right_mean_f32 = Complex::new(right_mean.re as f32, right_mean.im as f32);
-        extended_left
-            .iter_mut()
-            .zip(extended_right.iter_mut())
-            .for_each(|(left, right)| {
-                *left -= left_mean_f32;
-                *right -= right_mean_f32;
-            });
-
-        (extended_left, extended_right)
+            right_complex
+                .iter_mut()
+                .for_each(|point| *point = Complex::new(-point.im, point.re));
+            let mut finished_right = c2r.make_output_vec().into_boxed_slice();
+            _ = c2r.process_with_scratch(&mut right_complex, &mut finished_right, &mut scratch);
+            finished_right
+                .into_iter()
+                .take(original_length)
+                .collect::<Box<_>>()
+        };
+        (rotated_left, rotated_right)
     };
+
+    let analytic_left = f32_left_channel
+        .into_iter()
+        .zip(f32_rotated_left)
+        .map(|(left, rot_left)| Complex::new(left, rot_left))
+        .collect::<Box<_>>();
+    let analytic_right = f32_right_channel
+        .into_iter()
+        .zip(f32_rotated_right)
+        .map(|(right, rot_right)| Complex::new(right, rot_right))
+        .collect::<Box<_>>();
 
     // Since the multiplications take a long time to compute, the best way for me to get a good estimate would be by sampling in fixed intervals.
     // 1 to 31 since 0 or 32 will be the original level.
