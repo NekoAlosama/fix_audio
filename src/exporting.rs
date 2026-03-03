@@ -27,9 +27,9 @@ pub fn export_audio(file_path: &Path, audio: (Box<[f32]>, Box<[f32]>), sample_ra
 /// Write tags to exported audio.
 /// Requires `export_audio()` to be executed first.
 /// Unfortunately doubles Exporting time and memory since `hound` clears all tags when calling `.finalize()`.
-pub fn write_tags(file_path: &Path, maybe_tags: Option<Tag>) {
+pub fn write_tags(file_path: &Path, tags: Box<[Tag]>) {
     // We don't particularly care if tags are written
-    if let Some(tags) = maybe_tags {
-        _ = tags.save_to_path(file_path, WriteOptions::default());
+    for tag in tags {
+        _ = tag.save_to_path(file_path, WriteOptions::default());
     }
 }

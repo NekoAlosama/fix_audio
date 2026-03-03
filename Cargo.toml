@@ -1,16 +1,23 @@
 [package]
 name = "fix_audio"
-version = "0.9.2"
+version = "0.10.0"
 edition = "2024"
 
 [dependencies]
 ebur128 = "0.1.10"
-hound = "3.5.1"
-lofty = "0.22.4"
-mimalloc = { version = "0.1.48", features = ["v3", "override", "extended"] }
-rayon = "1.11.0"
-realfft = { version = "3.5.0", features = ["avx", "neon", "sse"] }
+hound = "3.5.*"
+lofty = { git = "https://github.com/Serial-ATA/lofty-rs.git" }
+mimalloc = { version = "0.1.*", features = ["v3", "extended"] }
+rayon = "1.11.*"
+realfft = "3.5.*"
 symphonia = { git = "https://github.com/pdeljanov/Symphonia.git", branch = "dev-0.6", features = ["opt-simd", "all"] }
+
+[features]
+default = ["final_rotation"]
+final_rotation = []
+
+[profile.dev]
+incremental = false # reason = "reduce size on disk for debug builds"
 
 [profile.release]
 opt-level = 3
@@ -22,7 +29,7 @@ panic = "abort"
 
 [profile.test_release]
 inherits = "release"
-debug = true
+debug = true # reason = "required for external debug tools"
 
 [lints.clippy]
 complexity =    {level = "warn", priority = -1}

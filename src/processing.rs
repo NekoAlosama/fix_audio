@@ -1,8 +1,8 @@
 use ebur128::{EbuR128, Mode};
-use lofty::tag::{ItemKey, ItemValue, Tag, TagItem, TagType};
+use lofty::tag::{ItemKey, Tag, TagExt, TagType};
 use rayon::iter::{
-    IndexedParallelIterator as _, IntoParallelRefIterator as _, IntoParallelRefMutIterator as _,
-    ParallelIterator as _,
+    IndexedParallelIterator as _, IntoParallelIterator as _, IntoParallelRefIterator as _,
+    IntoParallelRefMutIterator as _, ParallelIterator as _,
 };
 use realfft::RealFftPlanner;
 
@@ -36,20 +36,19 @@ fn gated_rms(samples: &[f64], sample_rate: u32) -> f64 {
     LOUDNESS_BASE.powf(loudness_db)
 }
 
-/// Plain DC removal.
-/// A high-pass filter isn't being used here in order to preserve the shape of the waveform.
-#[expect(clippy::needless_for_each, reason = "for parity with `par_remove_dc`")]
-pub fn plain_remove_dc(channel: &mut [f64]) {
-    let length = channel.len() as f64;
-    let dc = channel.iter().sum::<f64>() / length;
-    channel.iter_mut().for_each(|samp| *samp -= dc);
-}
-
-/// Parallel version of `plain_remove_dc()` if it's called when the thread pool is open.
-pub fn par_remove_dc(channel: &mut [f64]) {
-    let length = channel.len() as f64;
-    let dc = channel.par_iter().sum::<f64>() / length;
-    channel.par_iter_mut().for_each(|samp| *samp -= dc);
+/// Parallel DC removal.
+// A high-pass filter isn't being used here in order to preserve the shape of the waveform.
+fn par_remove_dc(channel: &mut [f64]) {
+    let finite_channel = channel
+        .par_iter()
+        .filter(|samp| samp.is_finite())
+        .copied()
+        .collect::<Box<[f64]>>();
+    let length = finite_channel.len() as f64;
+    let dc = finite_channel.into_par_iter().sum::<f64>() / length;
+    if dc.is_finite() {
+        channel.par_iter_mut().for_each(|samp| *samp -= dc);
+    }
 }
 
 /// All processing steps into one function.
@@ -69,7 +68,7 @@ pub fn process_samples(
     // Integrated Loudness shouldn't be affected by DC noise, but this is placed after DC removal just in case
     let true_left_rms = gated_rms(&left_channel, sample_rate);
     let true_right_rms = gated_rms(&right_channel, sample_rate);
-    let true_mean_rms = f64::sqrt(true_left_rms * true_right_rms);
+    let true_mean_rms = f64::sqrt(true_left_rms) * f64::sqrt(true_right_rms);
 
     // Average out plain RMS of left and right channels before processing
     // Might help in phase conflicts
@@ -77,16 +76,18 @@ pub fn process_samples(
     let plain_left_rms = f64::sqrt(
         left_channel
             .par_iter()
+            .filter(|samp| samp.is_finite())
             .fold(|| 0_f64, |acc, samp| samp.mul_add(*samp, acc))
             .sum(),
     );
     let plain_right_rms = f64::sqrt(
         right_channel
             .par_iter()
+            .filter(|samp| samp.is_finite())
             .fold(|| 0_f64, |acc, samp| samp.mul_add(*samp, acc))
             .sum(),
     );
-    let plain_mean_rms = f64::sqrt(plain_left_rms * plain_right_rms);
+    let plain_mean_rms = f64::sqrt(plain_left_rms) * f64::sqrt(plain_right_rms);
     let left_mult = plain_mean_rms / plain_left_rms;
     let right_mult = plain_mean_rms / plain_right_rms;
     left_channel
@@ -102,7 +103,11 @@ pub fn process_samples(
     let oop_counter = left_channel
         .par_iter()
         .zip(right_channel.par_iter())
-        .filter(|&(left_samp, right_samp)| left_samp.signum() != right_samp.signum())
+        .filter(|&(left_samp, right_samp)| {
+            (left_samp.signum() != right_samp.signum())
+                && left_samp.is_finite()
+                && right_samp.is_finite()
+        })
         .count();
     if oop_counter as f64 > 0.5_f64 * left_channel.len() as f64 {
         right_channel.par_iter_mut().for_each(|samp| *samp = -*samp);
@@ -134,31 +139,74 @@ pub fn process_samples(
 
     // Rotating the phase of a signal should not (significantly) change the observed RMS and integrated loudness
     // Since the following function converts the signal to f32 to save on memory, we can just return the result
-    fft::minimize_peak(processed_left, processed_right)
+
+    #[cfg(feature = "final_rotation")]
+    return fft::minimize_peak(processed_left, processed_right);
+    #[cfg(not(feature = "final_rotation"))]
+    {
+        use rayon::iter::IntoParallelIterator as _;
+
+        let f32_processed_left = processed_left
+            .into_par_iter()
+            .map(|samp| samp as f32)
+            .collect::<Box<[f32]>>();
+        let f32_processed_right = processed_right
+            .into_par_iter()
+            .map(|samp| samp as f32)
+            .collect::<Box<[f32]>>();
+        let peak = f32_processed_left
+            .iter()
+            .chain(f32_processed_right.iter())
+            .fold(f32::NEG_INFINITY, |samp, acc| {
+                let abs_samp = samp.abs();
+                if abs_samp == f32::INFINITY {
+                    // The peak must be really high for this to occur, but it does occur on clipped/compressed audio
+                    // foobar2000 suggests a higher peak for files in this situation, implying that there might be some interpolation occuring for that program
+                    *acc
+                } else {
+                    acc.max(samp.abs())
+                }
+            });
+        ((f32_processed_left, f32_processed_right), peak)
+    }
 }
 
 /// Modify tags to remove outdated info.
-pub fn process_metadata(maybe_tags: Option<Tag>, peak: f32) -> Option<Tag> {
-    // We don't particularly care if tags are written
-    if let Some(mut tags) = maybe_tags {
-        // For compatibility, all tags are written to WAV as Id3v2.4
-        tags.re_map(TagType::Id3v2);
+pub fn process_metadata(mut tags: Box<[Tag]>, peak: f32) -> Box<[Tag]> {
+    for tag in &mut tags {
+        tag.remove_empty();
 
         // File peak will change due to processing
-        tags.remove_key(&ItemKey::ReplayGainAlbumPeak);
-
-        // Added due to `.re_map()`
-        tags.remove_key(&ItemKey::EncoderSoftware); // Associates with the "ENCODING SETTINGS" tag lol
-        tags.remove_key(&ItemKey::EncoderSettings);
+        tag.remove_key(ItemKey::ReplayGainAlbumPeak);
 
         // Paste the new peak value
-        let new_peak_tag = TagItem::new(
-            ItemKey::ReplayGainTrackPeak,
-            ItemValue::Text(peak.to_string()),
-        );
-        tags.insert(new_peak_tag);
-
-        return Some(tags);
+        tag.insert_text(ItemKey::ReplayGainTrackPeak, peak.to_string());
     }
-    None
+    let mut id3v2_tags = tags.clone();
+    id3v2_tags.iter_mut().for_each(|tag| {
+        if tag.tag_type() != TagType::Id3v2 {
+            tag.re_map(TagType::Id3v2);
+        }
+    });
+    if let Some(id3v2_fields) = id3v2_tags.iter().map(TagExt::len).max() {
+        id3v2_tags = id3v2_tags
+            .into_iter()
+            .filter(|tag| tag.len() >= id3v2_fields)
+            .collect();
+    }
+
+    let mut riff_tags = tags.clone();
+    riff_tags.iter_mut().for_each(|tag| {
+        if tag.tag_type() != TagType::RiffInfo {
+            tag.re_map(TagType::RiffInfo);
+        }
+    });
+    if let Some(riff_fields) = riff_tags.iter().map(TagExt::len).max() {
+        riff_tags = riff_tags
+            .into_iter()
+            .filter(|tag| tag.len() >= riff_fields)
+            .collect();
+    }
+
+    id3v2_tags.into_iter().chain(riff_tags).collect()
 }

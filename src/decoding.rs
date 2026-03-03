@@ -148,19 +148,12 @@ pub fn get_samples(path: &path::PathBuf) -> SamplesResult {
 
 /// Get tags and sample rate for a given file using `lofty-rs`.
 /// Good to use after using `get_samples()` to verify that audio was found.
-pub fn get_metadata(path: &path::PathBuf) -> (Option<Tag>, u32) {
+pub fn get_metadata(path: &path::PathBuf) -> (Box<[Tag]>, u32) {
     let tagged_file = Probe::open(path)
         .expect("ERROR: file removed before processing")
         .read()
         .expect("ERROR: file in use");
-    let tags = {
-        let tag_attempt = tagged_file.primary_tag().cloned();
-        if tag_attempt.is_some() {
-            tag_attempt
-        } else {
-            tagged_file.first_tag().cloned()
-        }
-    };
+    let tags = tagged_file.tags().iter().cloned().collect();
     let sample_rate = tagged_file
         .properties()
         .sample_rate()

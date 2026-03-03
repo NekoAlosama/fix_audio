@@ -28,6 +28,8 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
     * Video files with an audio track
     * .opus files
     * .mp3 files: does not support invalid CRC checksums, so output files will have added silence
+* Lofty remaps tags to other tagging formats, so the conversion is usually lossy; non-standard tags like LYRICS, UNSYNCEDLYRICS/UNSYNCED_LYRICS/'UNSYNCED LYRICS', and 'DYNAMIC RANGE' are likely not copied over.
+  * Since this project exports files as .wav, you can try converting input files to 32-bit .wav while keeping tags using another program.
 * FFT alignment algorithm produces issues
   * [Research is ongoing](./research/)
 * FFT does not exactly preserve the shape of waveforms below 20hz
@@ -39,12 +41,13 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
 * Add option and confirmation to delete input files after processing
 * Improve program efficiency
   * Approximate performance:
-    * about 2.41 minutes of runtime per 1 hour of 44.1khz audio (5.15 minutes to process 2.14 hours of music (339 million samples))
+    * about 2.06 minutes of runtime per 1 hour of 44.1khz audio (6.16 minutes to process 3.00 hours of music (476 million samples))
   * Reduce memory usage
     * Seems like there's hidden clones/duplicates? Unsure if it's just bad logic on my part or my dependencies. Clippy isn't saying much in this regard.
     * Need a memory profiler
   * Possible slowdown due to CPU affinity (`rayon` does not implement CPU pinning or similar) or other applications
-  * `mimalloc` being used as an alternative allocator. Minor overallocation and may give better performance on other platforms
+  * Test `mimalloc` being used as an alternative allocator.
+    * Minor overallocation and may give better performance on other platforms.
   * (Windows only) Set the program's priority class (Idle -> Above Normal) and I/O priority (Normal -> High)
     * Approximate 50% speedup (90s to 60s on an old test suite) using System Informer to apply priorities
   * Add shortcut for mono files (remove DC noise only)
@@ -57,4 +60,4 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
 * Make functions generic over floats (allow `f32` or `f64` in case more precision is needed)
   * Considering always using `f64` over `f32` to ensure no quantization noise/imprecision
 
-![performance](./Screenshot%202025-12-21%20205638.png)
+![performance](./Screenshot%202026-03-02%20224853.png)

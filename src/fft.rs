@@ -1,13 +1,13 @@
-use core::{
-    f64::consts::{PI, TAU},
-    iter::once,
-};
+use core::{f64::consts::TAU, iter::once};
 use std::sync::Mutex;
 
 use rayon::iter::{IntoParallelIterator as _, ParallelIterator as _};
 use realfft::{RealFftPlanner, num_complex::Complex};
 
+#[cfg(feature = "final_rotation")]
 use crate::processing;
+#[cfg(feature = "final_rotation")]
+use core::f64::consts::PI;
 
 /// List of cosine coefficients of window function.
 ///
@@ -27,7 +27,7 @@ const WINDOW_COSINES: [(f64, f64); 6] = [
 /// Windowing is used to make the signal chunk fade in and out
 ///   to prevent discontinuities, which causes spectral leakage (noise tuned to the music).
 fn window(time_frame: usize) -> Box<[f64]> {
-    let f64_rate_recip = 1_f64 / (time_frame as f64);
+    let f64_rate_recip = (time_frame as f64 - 1_f64).recip(); // N - 1 for symmetric window
     // The actual level of the window doesn't really matter
     (0..time_frame)
         .into_par_iter()
@@ -55,6 +55,16 @@ fn get_fft_size(length: usize) -> usize {
     pow_of_2.min(pow_of_3).min(pow_of_6) as usize
 }
 
+/// Faster `.is_finite()` check compared to `num_traits`.
+fn is_finite(point: Complex<f64>) -> bool {
+    point.re.abs() < f64::INFINITY && point.im.abs() < f64::INFINITY
+}
+
+/// Faster `.norm_sqr()` calculation compared to `num_complex`.
+fn norm_sqr(point: Complex<f64>) -> f64 {
+    point.re.mul_add(point.re, point.im * point.im)
+}
+
 /// Aligns the phase angle of the left and right channels.
 // According to Intel VTune Profiler, this is the hottest function since it's in a hot loop.
 // I've tried a branchless and an SIMD version, but they pretty much compile to the same peformance.
@@ -63,26 +73,21 @@ fn get_fft_size(length: usize) -> usize {
     reason = "clippy thinks the operations done on Complex<f64> are for integers"
 )]
 fn align(original_left: &mut Complex<f64>, original_right: &mut Complex<f64>) {
-    //
-    let left_norm_sqr = original_left
-        .re
-        .mul_add(original_left.re, original_left.im * original_left.im);
-    let right_norm_sqr = original_right
-        .re
-        .mul_add(original_right.re, original_right.im * original_right.im);
+    let left_norm_sqr = norm_sqr(*original_left);
+    let right_norm_sqr = norm_sqr(*original_right);
 
     // Make the quieter channel a scaled-down copy of the louder channel
     if left_norm_sqr >= right_norm_sqr {
         // If the left channel is louder, the right channel should have the same angle as the left
         let new_right = *original_left * f64::sqrt(right_norm_sqr / left_norm_sqr); // This division is probably taking up the most time. Unsure how to fix that
 
-        if new_right.re.abs() < f64::INFINITY && new_right.im.abs() < f64::INFINITY {
+        if is_finite(new_right) {
             *original_right = new_right;
         }
     } else {
         let new_left = *original_right * f64::sqrt(left_norm_sqr / right_norm_sqr);
 
-        if new_left.re.abs() < f64::INFINITY && new_left.im.abs() < f64::INFINITY {
+        if is_finite(new_left) {
             *original_left = new_left;
         }
     }
@@ -101,17 +106,9 @@ pub fn overlapping_fft(
     // We should pad with half-a-second of silence to allow for half-windows at the beginning and end
     let half_time_frame = (time_frame * 0.5_f64).round_ties_even() as usize;
 
-    // For fft_size, there's different opinions online on how much zero-padding is needed
-    // Circular artifacts? Only useful in spectrograms?
-    let fft_size = {
-        let pre_fft_size = get_fft_size(rounded_time_frame); // Round to next power of 2 for some zero-padding and for a fast FFT
-        if (pre_fft_size as f64) >= 1.5_f64 * (rounded_time_frame as f64) {
-            pre_fft_size
-        } else {
-            // Ensure fft_size is at least 150% of rounded_time_frame
-            pre_fft_size.saturating_mul(2) // Move to the next power of two
-        }
-    };
+    // Since we're using a flat-top window and doing overlaps, we can probably assume that there should be no zero-padding aside from what's needed for a fast FFT.
+    // Plus, adding more padding will increase the runtime non-linearly. In this case, it's probably better to add more overlaps instead, since that is linear.
+    let fft_size = get_fft_size(rounded_time_frame);
 
     // We need a bit of silence at the beginning
     // This consumes left_channel and right_channel
@@ -132,16 +129,13 @@ pub fn overlapping_fft(
     let holding_right = Mutex::new(vec![0_f64; extended_length].into_boxed_slice());
     let window = window(rounded_time_frame);
 
-    // Windows need a bunch of hops
-    // Doing more chunks will help with clicking/zipper noise, but will increase runtime
-    // Sorta acts like anti-aliasing in a way
-    // Numerator should be 1_f64 for the mininum amount of overlaps, currently doing at least 16x (low difference between 16x and 32x) and at most 256x (at least 1 sample with 44.1khz and MIN_FREQ=20_f64)
-    // NOTE: possible reason for zipper noise is that the window isn't overlapping correctly/exactly.
-    //   alternatively, it's just a result of having discrete samples, so the only solution is this anti-aliasing-type solution
-    // TODO: check if upsampling first then downsampling the result is better
+    // Windows need a bunch of hops.
+    // A zipper noise is heard below ~16x the required overlaps, max should be 256x since we should have at least 1.0 sample per hop at 44.1khz and MIN_FREQ=20.0
+    // Noise likely comes from the fact that phase isn't smoothed with the previous frame, but that would require this run in serial instead of parallel
+    // Thus, we'll just overlap a lot so inconsistencies are smoothed out.
     let hop_indexes = {
         let mut pre_hop_indexes = vec![0_usize];
-        let hop_size = (time_frame / (WINDOW_COSINES.len() as f64 + 1_f64)) / 32_f64; // Minor spectrogram difference with 16x
+        let hop_size = (time_frame / (WINDOW_COSINES.len() as f64 + 1_f64)) / 32_f64; // 32x seems good enough, at least this increases runtime proportionally
         let mut pre_candidate = hop_size;
         while let hop_candidate = pre_candidate.round_ties_even() as usize
             && hop_candidate < extended_length
@@ -152,27 +146,23 @@ pub fn overlapping_fft(
         pre_hop_indexes.into_par_iter()
     };
 
-    // Up until the end, which should be basically a half-window
-    hop_indexes.for_each(|holding_position| {
-        // Surprisingly, these don't take much memory per thread
-        let mut left_chunk = extended_left
+    // Function moved due to Clippy lint
+    let multiply_and_pad = |channel: &[f64], hold_pos: usize| {
+        channel
             .iter()
-            .skip(holding_position)
+            .skip(hold_pos)
             .take(rounded_time_frame)
             .zip(window.iter())
             .map(|(&samp, &mult)| samp * mult)
             .chain(once(0_f64).cycle()) // Extend iterator by cycling 0
             .take(fft_size)
-            .collect::<Box<_>>();
-        let mut right_chunk = extended_right
-            .iter()
-            .skip(holding_position)
-            .take(rounded_time_frame)
-            .zip(window.iter())
-            .map(|(&samp, &mult)| samp * mult)
-            .chain(once(0_f64).cycle())
-            .take(fft_size)
-            .collect::<Box<_>>();
+            .collect::<Box<[f64]>>()
+    };
+    // Up until the end, which should be basically a half-window
+    hop_indexes.for_each(|holding_position| {
+        // Surprisingly, these don't take much memory per thread
+        let mut left_chunk = multiply_and_pad(&extended_left, holding_position);
+        let mut right_chunk = multiply_and_pad(&extended_right, holding_position);
 
         let mut scratch = c2r.make_scratch_vec().into_boxed_slice();
 
@@ -187,15 +177,9 @@ pub fn overlapping_fft(
             pre_right_complex
         };
 
-        // Remove DC offset for a better overlap
-        left_complex[0] = Complex::ZERO;
-        right_complex[0] = Complex::ZERO;
-
-        // Skip first/DC bin
         left_complex
             .iter_mut()
             .zip(right_complex.iter_mut())
-            .skip(1)
             .for_each(|(left_point, right_point)| {
                 align(left_point, right_point);
             });
@@ -209,11 +193,6 @@ pub fn overlapping_fft(
 
         // RealFFT, which uses RustFFT, amplifies the signal by fft_size
         // Normalization happens later in processing.rs
-
-        // TODO: check if we need to remove the DC from the IFFT
-        //   setting the DC bin to zero removes most DC, but not all, and I don't know if all of it needs to be removed since it could just be truly low-frequency noise
-        processing::plain_remove_dc(&mut left_chunk);
-        processing::plain_remove_dc(&mut right_chunk);
 
         // left_chunk is done first so less time is used locking the mutexes
         left_chunk
@@ -258,6 +237,7 @@ pub fn overlapping_fft(
     )
 }
 
+#[cfg(feature = "final_rotation")]
 /// Minimize peaks by interpreting the analytic signal as a polygon and finding the rotating angle that will minimize the width on the real axis.
 // Memory usage: a bit more than STFT's usage
 // Luckily faster than STFT above
@@ -281,74 +261,42 @@ pub fn minimize_peak(left_channel: Box<[f64]>, right_channel: Box<[f64]>) -> pro
         // Also pre-normalize since this will usually cause problems in the f32 area
         let fft_norm = (fft_size as f64).recip();
 
-        // Might be able to reduce these to a function
-        let rotated_left = {
-            let mut left_complex = r2c.make_output_vec().into_boxed_slice();
+        // Function reduced
+        let mut compute_rotated_channel = |channel: &[f64]| {
+            let mut complex = r2c.make_output_vec().into_boxed_slice();
             _ = r2c.process_with_scratch(
-                &mut left_channel
+                &mut channel
                     .iter()
                     .cycle() // Pad signal by cycling it
                     .take(fft_size)
                     .map(|samp| (samp * fft_norm) as f32)
-                    .collect::<Box<_>>(),
-                &mut left_complex,
+                    .collect::<Box<[f32]>>(),
+                &mut complex,
                 &mut scratch,
             );
-            f32_left_channel = left_channel
-                .into_iter()
-                .map(|samp| samp as f32)
-                .collect::<Box<_>>();
 
-            left_complex
+            complex
                 .iter_mut()
                 .for_each(|point| *point = Complex::new(-point.im, point.re)); // Equivalent to multiplying by i
-            let mut finished_left = c2r.make_output_vec().into_boxed_slice();
-            _ = c2r.process_with_scratch(&mut left_complex, &mut finished_left, &mut scratch);
-            finished_left
-                .into_iter()
-                .take(original_length)
-                .collect::<Box<_>>()
+            let mut finished = c2r.make_output_vec().into_boxed_slice();
+            _ = c2r.process_with_scratch(&mut complex, &mut finished, &mut scratch);
+            finished.into_iter()
         };
-        let rotated_right = {
-            let mut right_complex = r2c.make_output_vec().into_boxed_slice();
-            _ = r2c.process_with_scratch(
-                &mut right_channel
-                    .iter()
-                    .cycle() // Pad signal by cycling it
-                    .take(fft_size)
-                    .map(|samp| (samp * fft_norm) as f32)
-                    .collect::<Box<_>>(),
-                &mut right_complex,
-                &mut scratch,
-            );
-            f32_right_channel = right_channel
-                .into_iter()
-                .map(|samp| samp as f32)
-                .collect::<Box<_>>();
-
-            right_complex
-                .iter_mut()
-                .for_each(|point| *point = Complex::new(-point.im, point.re));
-            let mut finished_right = c2r.make_output_vec().into_boxed_slice();
-            _ = c2r.process_with_scratch(&mut right_complex, &mut finished_right, &mut scratch);
-            finished_right
-                .into_iter()
-                .take(original_length)
-                .collect::<Box<_>>()
-        };
+        let rotated_left = compute_rotated_channel(&left_channel);
+        f32_left_channel = left_channel.into_iter().map(|samp| samp as f32); // Reduce memory by mapping f64's to f32's now instead of later
+        let rotated_right = compute_rotated_channel(&right_channel);
+        f32_right_channel = right_channel.into_iter().map(|samp| samp as f32);
         (rotated_left, rotated_right)
     };
 
     let analytic_left = f32_left_channel
-        .into_iter()
         .zip(f32_rotated_left)
         .map(|(left, rot_left)| Complex::new(left, rot_left))
-        .collect::<Box<_>>();
+        .collect::<Box<[Complex<f32>]>>();
     let analytic_right = f32_right_channel
-        .into_iter()
         .zip(f32_rotated_right)
         .map(|(right, rot_right)| Complex::new(right, rot_right))
-        .collect::<Box<_>>();
+        .collect::<Box<[Complex<f32>]>>();
 
     // Since the multiplications take a long time to compute, the best way for me to get a good estimate would be by sampling in fixed intervals.
     // 1 to 31 since 0 or 32 will be the original level.
@@ -375,6 +323,11 @@ pub fn minimize_peak(left_channel: Box<[f64]>, right_channel: Box<[f64]>) -> pro
                 .re
                 .mul_add(test_angle.re, point.im * test_angle.im)
                 .abs();
+            if point_peak == f32::INFINITY {
+                // Ideally, the playback system is smart enough not to play an INFINITY or NEG_INFINITY sample
+                continue;
+            }
+
             if point_peak > saved_peak {
                 good_angle = false;
                 break;
