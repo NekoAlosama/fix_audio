@@ -51,16 +51,13 @@ fn get_paths(directory: path::PathBuf) -> io::Result<Box<[path::PathBuf]>> {
 /// Main function to execute.
 fn main() -> Result<(), Error> {
     // Prevent the system from locking up by using all of the cores
-    // SAFETY: errors out if `rayon` initializes even earlier than this line. Shouldn't happen
-    unsafe {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads({
-                let local_threads = usize::from(thread::available_parallelism()?) as f32; // Cannot use rayon::current_num_threads() since that will initialize early
-                ((local_threads * 0.8).round_ties_even() as usize).max(1_usize) // Seems okay to use ~71% of the cores
-            })
-            .build_global()
-            .unwrap_unchecked();
-    }
+    rayon::ThreadPoolBuilder::new()
+        .num_threads({
+            let local_threads = usize::from(thread::available_parallelism()?) as f32; // Cannot use rayon::current_num_threads() since that will initialize early
+            ((local_threads * 0.8).round_ties_even() as usize).max(1_usize) // Seems okay to use ~80% of the cores
+        })
+        .build_global()
+        .expect("ERROR: Thread pool build error.");
 
     // Keeping the time for benchmarking
     let time = time::Instant::now();
@@ -83,12 +80,12 @@ fn main() -> Result<(), Error> {
     // Because the STFT size shouldn't be that large (9600 max), we can reuse it, even for smaller sizes
     let mut realfft_planner = RealFftPlanner::new();
 
-    println!("Setup and file-exploring time: {:#?}", time.elapsed());
+    println!("Setup and file-exploring time: {:#.3?}", time.elapsed());
     for entry in entries {
         // SAFETY: `INPUT_DIR` should always be there
         let stripped_entry = unsafe { entry.strip_prefix(INPUT_DIR).unwrap_unchecked() };
         println!("Found file: {}", stripped_entry.display());
-        print!("	Decoding... ");
+        print!("	Decoding...");
         io::stdout().flush()?; // Show print instantly
         let mut output_path = path::PathBuf::from(OUTPUT_DIR).join(stripped_entry);
 
@@ -129,18 +126,18 @@ fn main() -> Result<(), Error> {
 
         let (tags, sample_rate) = decoding::get_metadata(&entry);
 
-        print!("(T+{:#?})", time.elapsed());
+        print!(" (T+{:#.3?}),", time.elapsed());
         io::stdout().flush()?;
 
-        print!("	Processing... ");
+        print!("	Processing...");
         io::stdout().flush()?;
         let (modified_audio, modified_audio_peak) =
-            processing::process_samples(&mut realfft_planner, channels, sample_rate);
+            processing::process_samples(&mut realfft_planner, channels, sample_rate)?;
         let modified_tags = processing::process_metadata(tags, modified_audio_peak);
-        print!("(T+{:#?})", time.elapsed());
+        print!(" (T+{:#.3?}),", time.elapsed());
         io::stdout().flush()?;
 
-        print!("	Exporting... ");
+        print!("	Exporting...");
         io::stdout().flush()?;
         output_path.set_extension("wav");
         // SAFETY: output_path is defined, so it cannot be on the root
@@ -149,7 +146,7 @@ fn main() -> Result<(), Error> {
         // Unfortunately doubles Exporting time and memory since `hound` clears all tags when calling `.finalize()`
         exporting::write_tags(&output_path, modified_tags);
 
-        println!("(T+{:#?})", time.elapsed());
+        println!(" (T+{:#.3?})", time.elapsed());
     }
     Ok(())
 }

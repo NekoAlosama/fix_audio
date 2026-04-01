@@ -4,7 +4,6 @@ Pet project of processing audio files by and for NekoAlosma to learn FFT process
 Currently, this program takes in stereo audio files (input folder created on first run) and:
 * Aligns the phase angle between the left and right channel
   * Concept based on Thimeo Stereo Tool's "Image phase amplifier: 0%", automated through Thimeo WatchCat
-    * [Researching how to replicate its results](./research/)
   * Use case: switching between a mono speaker to a car stereo
     * Prevents per-frequency phase cancellation for a better downmix to mono
     * Heavily reduces the perceived stereo width, but instrument placement / channel-specific sounds are preserved
@@ -28,10 +27,8 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
     * Video files with an audio track
     * .opus files
     * .mp3 files: does not support invalid CRC checksums, so output files will have added silence
-* Lofty remaps tags to other tagging formats, so the conversion is usually lossy; non-standard tags like LYRICS, UNSYNCEDLYRICS/UNSYNCED_LYRICS/'UNSYNCED LYRICS', and 'DYNAMIC RANGE' are likely not copied over.
+* Lofty is used to remaps tags to .wav's ID3v2 and RIFF INFO tags, so the conversion is usually lossy; non-standard tags like LYRICS, UNSYNCEDLYRICS/UNSYNCED_LYRICS/'UNSYNCED LYRICS', and 'DYNAMIC RANGE' are likely not copied over.
   * Since this project exports files as .wav, you can try converting input files to 32-bit .wav while keeping tags using another program.
-* FFT alignment algorithm produces issues
-  * [Research is ongoing](./research/)
 * FFT does not exactly preserve the shape of waveforms below 20hz
   * Side effect: FFT produces relatively minor frequency smearing / pre-echo depending on chosen frequency
     * Mainly affects very short hi-hats and sounds delayed in one channel
@@ -40,14 +37,9 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
 ### Things to do:
 * Add option and confirmation to delete input files after processing
 * Improve program efficiency
-  * Approximate performance:
-    * about 2.06 minutes of runtime per 1 hour of 44.1khz audio (6.16 minutes to process 3.00 hours of music (476 million samples))
-  * Reduce memory usage
-    * Seems like there's hidden clones/duplicates? Unsure if it's just bad logic on my part or my dependencies. Clippy isn't saying much in this regard.
-    * Need a memory profiler
+  * Approximate performance on my workstation:
+    * ~5.21 minutes of runtime per 1 hour of 44.1khz audio
   * Possible slowdown due to CPU affinity (`rayon` does not implement CPU pinning or similar) or other applications
-  * Test `mimalloc` being used as an alternative allocator.
-    * Minor overallocation and may give better performance on other platforms.
   * (Windows only) Set the program's priority class (Idle -> Above Normal) and I/O priority (Normal -> High)
     * Approximate 50% speedup (90s to 60s on an old test suite) using System Informer to apply priorities
   * Add shortcut for mono files (remove DC noise only)
@@ -57,7 +49,5 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
     * Could just suggest cutting down the audio into smaller bits
   * Test files that shorter than FFT (sound effects?)
   * Mono files are converted to stereo files
-* Make functions generic over floats (allow `f32` or `f64` in case more precision is needed)
-  * Considering always using `f64` over `f32` to ensure no quantization noise/imprecision
 
-![performance](./Screenshot%202026-03-02%20224853.png)
+![performance](<Screenshot 2026-03-31 201506.png>)

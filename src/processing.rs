@@ -1,3 +1,5 @@
+use std::io::{self, Error, Write as _};
+
 use ebur128::{EbuR128, Mode};
 use lofty::tag::{ItemKey, Tag, TagExt, TagType};
 use rayon::iter::{
@@ -11,7 +13,7 @@ use crate::fft;
 /// Force minimum reconstructed frequency to `MIN_FREQ` hertz.
 /// Thimeo Stereo Tool suggests that it uses 4096 samples, which is about 11hz between 44.1khz and 48khz audio.
 // For some reason, the 11hz creates smearing here, but not in Stereo Tool?
-const MIN_FREQ: f64 = 20.;
+const MIN_FREQ: f32 = 20.;
 
 /// 10^(1/20), for `gated_rms()`.
 /// `10_f64.powf(loudness * 0.05_f64)` == `LOUDNESS_BASE.powf(loudness)`.
@@ -24,28 +26,28 @@ pub type AudioPeak = ((Box<[f32]>, Box<[f32]>), f32);
 /// Basically a two-pass windowed RMS.
 ///   First pass is used to detect and ignore silence at -70dB.
 ///   Second pass is used to detect and ignore audio that's 10dB below the first-pass result.
-fn gated_rms(samples: &[f64], sample_rate: u32) -> f64 {
+fn gated_rms(samples: &[f32], sample_rate: u32) -> f32 {
     let mut ebur128 = EbuR128::new(1_u32, sample_rate, Mode::I)
         .expect("Sample rate greater than 2.8224Mhz for some reason");
-    // .add_frames_f64_planar() sucks since it requires an array of channel arrays, so for one channel, it needs an array around it
+    // .add_frames_f32_planar() sucks since it requires an array of channel arrays, so for one channel, it needs an array around it
     // Result is dropped since it'll only panic if channels == 0, which does not happen above
-    _ = ebur128.add_frames_f64(samples);
+    _ = ebur128.add_frames_f32(samples);
+
     // SAFETY: `loudness_global()` panics if not using Mode::I, which we are doing above
     let loudness_db = unsafe { ebur128.loudness_global().unwrap_unchecked() };
-
-    LOUDNESS_BASE.powf(loudness_db)
+    LOUDNESS_BASE.powf(loudness_db) as f32 //`loudness_global()` always returns an f64, so we just truncate at the end
 }
 
 /// Parallel DC removal.
 // A high-pass filter isn't being used here in order to preserve the shape of the waveform.
-fn par_remove_dc(channel: &mut [f64]) {
+fn par_remove_dc(channel: &mut [f32]) {
     let finite_channel = channel
         .par_iter()
         .filter(|samp| samp.is_finite())
         .copied()
-        .collect::<Box<[f64]>>();
-    let length = finite_channel.len() as f64;
-    let dc = finite_channel.into_par_iter().sum::<f64>() / length;
+        .collect::<Box<[f32]>>();
+    let length = finite_channel.len() as f32;
+    let dc = finite_channel.into_par_iter().sum::<f32>() / length;
     if dc.is_finite() {
         channel.par_iter_mut().for_each(|samp| *samp -= dc);
     }
@@ -53,12 +55,13 @@ fn par_remove_dc(channel: &mut [f64]) {
 
 /// All processing steps into one function.
 pub fn process_samples(
-    realfft_planner: &mut RealFftPlanner<f64>,
-    data: (Box<[f64]>, Box<[f64]>),
+    realfft_planner: &mut RealFftPlanner<f32>,
+    data: (Box<[f32]>, Box<[f32]>),
     sample_rate: u32,
-) -> AudioPeak {
+) -> Result<AudioPeak, Error> {
     let mut left_channel = data.0;
     let mut right_channel = data.1;
+    let length_f32 = left_channel.len() as f32;
 
     // Remove DC before processing
     // DC might affect magnitude of `MIN_FREQ` Hz and interpolated values close to it
@@ -68,26 +71,26 @@ pub fn process_samples(
     // Integrated Loudness shouldn't be affected by DC noise, but this is placed after DC removal just in case
     let true_left_rms = gated_rms(&left_channel, sample_rate);
     let true_right_rms = gated_rms(&right_channel, sample_rate);
-    let true_mean_rms = f64::sqrt(true_left_rms) * f64::sqrt(true_right_rms);
+    let true_mean_rms = f32::sqrt(true_left_rms) * f32::sqrt(true_right_rms);
 
     // Average out plain RMS of left and right channels before processing
     // Might help in phase conflicts
     // Human hearing doesn't matter here?
-    let plain_left_rms = f64::sqrt(
+    let plain_left_rms = f32::sqrt(
         left_channel
             .par_iter()
             .filter(|samp| samp.is_finite())
-            .fold(|| 0_f64, |acc, samp| samp.mul_add(*samp, acc))
+            .fold(|| 0_f32, |acc, samp| samp.mul_add(*samp, acc))
             .sum(),
     );
-    let plain_right_rms = f64::sqrt(
+    let plain_right_rms = f32::sqrt(
         right_channel
             .par_iter()
             .filter(|samp| samp.is_finite())
-            .fold(|| 0_f64, |acc, samp| samp.mul_add(*samp, acc))
+            .fold(|| 0_f32, |acc, samp| samp.mul_add(*samp, acc))
             .sum(),
     );
-    let plain_mean_rms = f64::sqrt(plain_left_rms) * f64::sqrt(plain_right_rms);
+    let plain_mean_rms = f32::sqrt(plain_left_rms) * f32::sqrt(plain_right_rms);
     let left_mult = plain_mean_rms / plain_left_rms;
     let right_mult = plain_mean_rms / plain_right_rms;
     left_channel
@@ -98,22 +101,35 @@ pub fn process_samples(
             *right_samp *= right_mult;
         });
 
-    // Out-of-phase checker, flips the right channel if a majority of samples are out-of-phase
+    // Out-of-phase checker
+    let oop_counter = |lc: &[f32], rc: &[f32]| -> usize {
+        lc.par_iter()
+            .zip(rc.par_iter())
+            .filter(|&(left_samp, right_samp)| {
+                (left_samp.signum() != right_samp.signum())
+                    && left_samp.is_finite()
+                    && right_samp.is_finite()
+            })
+            .count()
+    };
+
+    let pre_fft_oop_count = oop_counter(&left_channel, &right_channel) as f32;
+
+    print!(
+        " (OOP: {:.3?}% ->",
+        100_f32 * pre_fft_oop_count / length_f32
+    );
+    io::stdout().flush()?;
+
+    // Flips the right channel if a majority of samples are out-of-phase
     // Used to reduce a lot of near-zero-sum cases
-    let oop_counter = left_channel
-        .par_iter()
-        .zip(right_channel.par_iter())
-        .filter(|&(left_samp, right_samp)| {
-            (left_samp.signum() != right_samp.signum())
-                && left_samp.is_finite()
-                && right_samp.is_finite()
-        })
-        .count();
-    if oop_counter as f64 > 0.5_f64 * left_channel.len() as f64 {
+    if pre_fft_oop_count > 0.5_f32 * length_f32 {
         right_channel.par_iter_mut().for_each(|samp| *samp = -*samp);
     }
 
-    let time_frame = f64::from(sample_rate) / MIN_FREQ; // actually in number of samples
+    let time_frame = (sample_rate as f32) / MIN_FREQ; // actually in number of samples
+
+    // Optimum reduction is ~78.5%, first pass reduction is 65%, second pass is ~70%
     let (mut processed_left, mut processed_right) =
         fft::overlapping_fft(realfft_planner, time_frame, left_channel, right_channel);
 
@@ -140,24 +156,18 @@ pub fn process_samples(
     // Rotating the phase of a signal should not (significantly) change the observed RMS and integrated loudness
     // Since the following function converts the signal to f32 to save on memory, we can just return the result
 
+    let post_fft_oop_count = oop_counter(&processed_left, &processed_right) as f32;
+
+    print!(" {:.3?}%)", 100_f32 * post_fft_oop_count / length_f32);
+    io::stdout().flush()?;
+
     #[cfg(feature = "final_rotation")]
-    return fft::minimize_peak(processed_left, processed_right);
+    return Ok(fft::minimize_peak(processed_left, processed_right));
     #[cfg(not(feature = "final_rotation"))]
     {
-        use rayon::iter::IntoParallelIterator as _;
-
-        let f32_processed_left = processed_left
-            .into_par_iter()
-            .map(|samp| samp as f32)
-            .collect::<Box<[f32]>>();
-        let f32_processed_right = processed_right
-            .into_par_iter()
-            .map(|samp| samp as f32)
-            .collect::<Box<[f32]>>();
-        let peak = f32_processed_left
-            .iter()
-            .chain(f32_processed_right.iter())
-            .fold(f32::NEG_INFINITY, |samp, acc| {
+        let peak = processed_left.iter().chain(processed_right.iter()).fold(
+            f32::NEG_INFINITY,
+            |samp, acc| {
                 let abs_samp = samp.abs();
                 if abs_samp == f32::INFINITY {
                     // The peak must be really high for this to occur, but it does occur on clipped/compressed audio
@@ -166,8 +176,9 @@ pub fn process_samples(
                 } else {
                     acc.max(samp.abs())
                 }
-            });
-        ((f32_processed_left, f32_processed_right), peak)
+            },
+        );
+        Ok(((processed_left, processed_right), peak))
     }
 }
 

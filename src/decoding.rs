@@ -18,7 +18,7 @@ use symphonia::{
 };
 
 /// Filler type being used because of a Clippy lint.
-type SamplesResult = Result<(Box<[f64]>, Box<[f64]>), Error>;
+type SamplesResult = Result<(Box<[f32]>, Box<[f32]>), Error>;
 /// Get samples for a given file using `Symphonia`.
 pub fn get_samples(path: &path::PathBuf) -> SamplesResult {
     // Based on `Symphonia`'s docs.rs page and example code (mix of 0.5.4 and dev-0.6)
@@ -71,10 +71,10 @@ pub fn get_samples(path: &path::PathBuf) -> SamplesResult {
 
     let track_id = track.id;
 
-    let mut left_samples: Vec<f64> = vec![];
-    let mut right_samples: Vec<f64> = vec![];
+    let mut left_samples: Vec<f32> = vec![];
+    let mut right_samples: Vec<f32> = vec![];
 
-    let mut sample_buf: Vec<Vec<f64>> = vec![];
+    let mut sample_buf: Vec<Vec<f32>> = vec![];
     let mut channel_count = 0;
 
     // 9
@@ -91,10 +91,10 @@ pub fn get_samples(path: &path::PathBuf) -> SamplesResult {
                         // .copy_to_vecs_planar() requires a Vec containing the channels
                         match channel_count {
                             1 => {
-                                sample_buf = vec![vec![0_f64; audio_buf.samples_planar()]];
+                                sample_buf = vec![vec![0_f32; audio_buf.samples_planar()]];
                             }
                             2 => {
-                                sample_buf = vec![vec![0_f64; audio_buf.samples_planar()]; 2];
+                                sample_buf = vec![vec![0_f32; audio_buf.samples_planar()]; 2];
                             }
                             _ => {
                                 return Err(Error::Unsupported("Too many channels"));
