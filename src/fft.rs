@@ -177,14 +177,14 @@ pub fn overlapping_fft(
 
     // We need a bit of silence at the beginning
     // This consumes left_channel and right_channel
-    let extended_left = vec![0_f32; half_time_frame]
-        .into_iter()
-        .chain(left_channel)
-        .collect::<Box<[f32]>>();
-    let extended_right = vec![0_f32; half_time_frame]
-        .into_iter()
-        .chain(right_channel)
-        .collect::<Box<[f32]>>();
+    let build = |channel: Box<[f32]>| {
+        vec![0_f32; half_time_frame]
+            .into_iter()
+            .chain(channel)
+            .collect::<Box<[f32]>>()
+    };
+    let extended_left = build(left_channel);
+    let extended_right = build(right_channel);
     let extended_length = extended_left.len();
 
     // `.into_boxed_slice()` is here to prevent overallocation if it stayed as a Vec
@@ -261,51 +261,38 @@ pub fn overlapping_fft(
         // RealFFT, which uses RustFFT, amplifies the signal by fft_size
         // Normalization happens later in processing.rs
 
-        // left_chunk is done first so less time is used locking the mutexes
-        left_chunk
-            .into_iter()
-            .zip(
-                holding_left
-                    .lock()
-                    .expect("Critical thread was killed")
-                    .iter_mut()
-                    .skip(holding_position),
-            )
-            .for_each(|(left_samp, hold_left)| {
-                *hold_left = left_samp.mul_add(fft_sqrt_norm, *hold_left);
-            });
+        let add_to_hold = |chunk: Box<[f32]>, hold_channel: &Mutex<Box<[f32]>>| {
+            chunk
+                .into_iter()
+                .zip(
+                    hold_channel
+                        .lock()
+                        .expect("Critical thread was killed")
+                        .iter_mut()
+                        .skip(holding_position),
+                )
+                .for_each(|(new_samp, hold_samp)| {
+                    *hold_samp = new_samp.mul_add(fft_sqrt_norm, *hold_samp);
+                });
+        };
 
-        right_chunk
-            .into_iter()
-            .zip(
-                holding_right
-                    .lock()
-                    .expect("Critical thread was killed")
-                    .iter_mut()
-                    .skip(holding_position),
-            )
-            .for_each(|(right_samp, hold_right)| {
-                *hold_right = right_samp.mul_add(fft_sqrt_norm, *hold_right);
-            });
+        // left_chunk is done first so less time is used locking the mutexes
+        add_to_hold(left_chunk, &holding_left);
+        add_to_hold(right_chunk, &holding_right);
     });
 
     // Overlap-adding amplifies the signal by (WINDOW_COSINES.len() as f32 + 1_f32) or 1/hop_time_frame
     // Normalization happens later in processing.rs
 
-    (
-        holding_left
+    let collect = |channel: Mutex<Box<[f32]>>| {
+        channel
             .into_inner()
             .expect("Critical thread was killed")
             .into_iter() // Don't think doing .into_par_iter() does anything
             .skip(half_time_frame)
-            .collect(),
-        holding_right
-            .into_inner()
-            .expect("Critical thread was killed")
-            .into_iter()
-            .skip(half_time_frame)
-            .collect(),
-    )
+            .collect()
+    };
+    (collect(holding_left), collect(holding_right))
 }
 
 #[cfg(feature = "final_rotation")]
