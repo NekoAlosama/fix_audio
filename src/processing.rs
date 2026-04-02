@@ -68,39 +68,6 @@ pub fn process_samples(
     par_remove_dc(&mut left_channel);
     par_remove_dc(&mut right_channel);
 
-    // Integrated Loudness shouldn't be affected by DC noise, but this is placed after DC removal just in case
-    let true_left_rms = gated_rms(&left_channel, sample_rate);
-    let true_right_rms = gated_rms(&right_channel, sample_rate);
-    let true_mean_rms = f32::sqrt(true_left_rms) * f32::sqrt(true_right_rms);
-
-    // Average out plain RMS of left and right channels before processing
-    // Might help in phase conflicts
-    // Human hearing doesn't matter here?
-    let plain_left_rms = f32::sqrt(
-        left_channel
-            .par_iter()
-            .filter(|samp| samp.is_finite())
-            .fold(|| 0_f32, |acc, samp| samp.mul_add(*samp, acc))
-            .sum(),
-    );
-    let plain_right_rms = f32::sqrt(
-        right_channel
-            .par_iter()
-            .filter(|samp| samp.is_finite())
-            .fold(|| 0_f32, |acc, samp| samp.mul_add(*samp, acc))
-            .sum(),
-    );
-    let plain_mean_rms = f32::sqrt(plain_left_rms) * f32::sqrt(plain_right_rms);
-    let left_mult = plain_mean_rms / plain_left_rms;
-    let right_mult = plain_mean_rms / plain_right_rms;
-    left_channel
-        .par_iter_mut()
-        .zip(right_channel.par_iter_mut())
-        .for_each(|(left_samp, right_samp)| {
-            *left_samp *= left_mult;
-            *right_samp *= right_mult;
-        });
-
     // Out-of-phase checker
     let oop_counter = |lc: &[f32], rc: &[f32]| -> usize {
         lc.par_iter()
@@ -127,6 +94,36 @@ pub fn process_samples(
         right_channel.par_iter_mut().for_each(|samp| *samp = -*samp);
     }
 
+    // Integrated Loudness shouldn't be affected by DC noise, but this is placed after DC removal just in case
+    let true_left_rms = gated_rms(&left_channel, sample_rate);
+    let true_right_rms = gated_rms(&right_channel, sample_rate);
+    let true_mean_rms = f32::sqrt(true_left_rms) * f32::sqrt(true_right_rms);
+
+    // Average out plain RMS of left and right channels before processing
+    // Might help in phase conflicts
+    // Human hearing doesn't matter here?
+    let plain_rms = |channel: &[f32]| {
+        f32::sqrt(
+            channel
+                .par_iter()
+                .filter(|samp| samp.is_finite())
+                .fold(|| 0_f32, |acc, samp| samp.mul_add(*samp, acc))
+                .sum(),
+        )
+    };
+    let plain_left_rms = plain_rms(&left_channel);
+    let plain_right_rms = plain_rms(&right_channel);
+    let plain_mean_rms = f32::sqrt(plain_left_rms) * f32::sqrt(plain_right_rms);
+    let left_mult = plain_mean_rms / plain_left_rms;
+    let right_mult = plain_mean_rms / plain_right_rms;
+    left_channel
+        .par_iter_mut()
+        .zip(right_channel.par_iter_mut())
+        .for_each(|(left_samp, right_samp)| {
+            *left_samp *= left_mult;
+            *right_samp *= right_mult;
+        });
+
     let time_frame = (sample_rate as f32) / MIN_FREQ; // actually in number of samples
 
     // Optimum reduction is ~78.5%, first pass reduction is 65%, second pass is ~70%
@@ -137,6 +134,11 @@ pub fn process_samples(
     // As such, DC noise is likely added and should be removed since we'll multiply the signals later
     par_remove_dc(&mut processed_left);
     par_remove_dc(&mut processed_right);
+
+    let post_fft_oop_count = oop_counter(&processed_left, &processed_right) as f32;
+
+    print!(" {:.3?}%)", 100_f32 * post_fft_oop_count / length_f32);
+    io::stdout().flush()?;
 
     // Average out the loudness of the left and right channels
     // This handles amplification by RustFFT and overlap-adding, assuming there isn't much precision loss
@@ -154,12 +156,6 @@ pub fn process_samples(
         });
 
     // Rotating the phase of a signal should not (significantly) change the observed RMS and integrated loudness
-    // Since the following function converts the signal to f32 to save on memory, we can just return the result
-
-    let post_fft_oop_count = oop_counter(&processed_left, &processed_right) as f32;
-
-    print!(" {:.3?}%)", 100_f32 * post_fft_oop_count / length_f32);
-    io::stdout().flush()?;
 
     #[cfg(feature = "final_rotation")]
     return Ok(fft::minimize_peak(processed_left, processed_right));

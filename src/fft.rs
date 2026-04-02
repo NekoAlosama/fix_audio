@@ -106,54 +106,41 @@ fn norm_sqr(point: Complex<f32>) -> f32 {
     reason = "clippy thinks the operations done on Complex<f32> are for integers"
 )]
 fn align(original_left: &mut Complex<f32>, original_right: &mut Complex<f32>) {
-    let left_norm_sqr = norm_sqr(*original_left);
-    let right_norm_sqr = norm_sqr(*original_right);
+    let left_norm = f32::sqrt(norm_sqr(*original_left));
+    let right_norm = f32::sqrt(norm_sqr(*original_right));
 
-    let align = *original_left + *original_right;
-    let align_norm_sqr = norm_sqr(align);
-
-    let new_left = align * f32::sqrt(left_norm_sqr / align_norm_sqr);
-    let new_right = align * f32::sqrt(right_norm_sqr / align_norm_sqr);
-
-    if is_finite(new_left) && is_finite(new_right) {
-        *original_left = new_left;
-        *original_right = new_right;
+    // Primarily, we want to minimize rotation distance
+    if left_norm > right_norm {
+        let new_right = *original_left * (right_norm / left_norm);
+        if is_finite(new_right) {
+            *original_right = new_right;
+        }
+        // If the above fails, then both _norm's are near zero
+    } else if right_norm > left_norm {
+        let new_left = *original_right * (left_norm / right_norm);
+        if is_finite(new_left) {
+            *original_left = new_left;
+        }
+        // If the above fails, then both _norm's are near zero
     } else {
-        // Marked as #[cold]
-        backup_align(original_left, original_right, left_norm_sqr, right_norm_sqr);
+        // If the channels have the same magnitude, then any rotations will result in the same distance
+        // Thus, we'll just use the sum to try and get an inbetween angle
+        let align = *original_left + *original_right;
+        let align_norm = f32::sqrt(norm_sqr(align));
+
+        let new_align_left = align * (left_norm / align_norm);
+        let new_align_right = align * (right_norm / align_norm);
+
+        if is_finite(new_align_left) && is_finite(new_align_right) {
+            *original_left = new_align_left;
+            *original_right = new_align_right;
+        } else {
+            // If we still can't get anything, the channels are either out-of-phase or near zero.
+            // To be safe, we'll just invert the right channel.
+            *original_right = -*original_right;
+        }
     }
 }
-
-/// Aligns the phase of the left and right channels in case `align()` fails.
-// `align()` primarily fails if `align_norm_sqr` is near zero, so there would be an f32 division by zero because `align` is near the origin.
-// As a backup, we'll multiply the signals to get some non-zero point, unless both points were zero.
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "clippy thinks the operations done on Complex<f32> are for integers"
-)]
-#[cold]
-#[inline(never)] // Because of #[cold] above
-fn backup_align(
-    original_left: &mut Complex<f32>,
-    original_right: &mut Complex<f32>,
-    left_norm_sqr: f32,
-    right_norm_sqr: f32,
-) {
-    // Negative sign used to aim to the positive real axis, since i*i=-1 and 1*-1=-1
-    let align = -(*original_left * *original_right);
-    let align_norm_sqr = norm_sqr(align);
-
-    let new_left = align * f32::sqrt(left_norm_sqr / align_norm_sqr);
-    let new_right = align * f32::sqrt(right_norm_sqr / align_norm_sqr);
-
-    if is_finite(new_left) && is_finite(new_right) {
-        *original_left = new_left;
-        *original_right = new_right;
-    } else {
-        // This branch would've been reached if *original_left and *original_rigtht were significantly near or at zero, so we don't really care about them at this point.
-    }
-}
-
 /// STFT that, in each frame, aligns each frequency to the louder channel's phase angle.
 #[expect(
     clippy::arithmetic_side_effects,
@@ -246,9 +233,9 @@ pub fn overlapping_fft(
             .iter_mut()
             .zip(right_complex.iter_mut())
             .for_each(|(left_point, right_point)| {
-                *left_point *= fft_sqrt_norm;
-                *right_point *= fft_sqrt_norm;
                 align(left_point, right_point);
+                *left_point *= fft_sqrt_norm; // Do normalization after so the above points are using larger numbers
+                *right_point *= fft_sqrt_norm;
             });
 
         // left_chunk and right_chunk will be overwritten
