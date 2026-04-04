@@ -109,38 +109,31 @@ fn align(original_left: &mut Complex<f32>, original_right: &mut Complex<f32>) {
     let left_norm = f32::sqrt(norm_sqr(*original_left));
     let right_norm = f32::sqrt(norm_sqr(*original_right));
 
-    // Primarily, we want to minimize rotation distance
-    if left_norm > right_norm {
-        let new_right = *original_left * (right_norm / left_norm);
-        if is_finite(new_right) {
-            *original_right = new_right;
-        }
-        // If the above fails, then both _norm's are near zero
-    } else if right_norm > left_norm {
-        let new_left = *original_right * (left_norm / right_norm);
-        if is_finite(new_left) {
-            *original_left = new_left;
-        }
-        // If the above fails, then both _norm's are near zero
-    } else {
-        // If the channels have the same magnitude, then any rotations will result in the same distance
-        // Thus, we'll just use the sum to try and get an inbetween angle
-        let align = *original_left + *original_right;
-        let align_norm = f32::sqrt(norm_sqr(align));
-
-        let new_align_left = align * (left_norm / align_norm);
-        let new_align_right = align * (right_norm / align_norm);
-
-        if is_finite(new_align_left) && is_finite(new_align_right) {
-            *original_left = new_align_left;
-            *original_right = new_align_right;
+    // It seems the best algorithm may be a smooth/soft-argmax algorithm
+    // This is where we have a weighted sum of the channels, but the weight is e^|channel|
+    // For the following code, we're aiming for a negative exponent so one of the channels become silence
+    let align = {
+        if left_norm >= right_norm {
+            *original_left + *original_right * f32::exp(right_norm - left_norm)
         } else {
-            // If we still can't get anything, the channels are either out-of-phase or near zero.
-            // To be safe, we'll just invert the right channel.
-            *original_right = -*original_right;
+            *original_left * f32::exp(left_norm - right_norm) + *original_right
         }
+    };
+    let align_norm = f32::sqrt(norm_sqr(align));
+
+    let new_left = align * (left_norm / align_norm);
+    let new_right = align * (right_norm / align_norm);
+
+    if is_finite(new_left) && is_finite(new_right) {
+        *original_left = new_left;
+        *original_right = new_right;
+    } else {
+        // This case occurs if the channels are exactly out-of-phase of are both silence
+        // Hence, the best course of action seems to just be inverting one of the channels
+        *original_right = -*original_right;
     }
 }
+
 /// STFT that, in each frame, aligns each frequency to the louder channel's phase angle.
 #[expect(
     clippy::arithmetic_side_effects,

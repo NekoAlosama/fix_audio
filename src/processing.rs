@@ -88,12 +88,6 @@ pub fn process_samples(
     );
     io::stdout().flush()?;
 
-    // Flips the right channel if a majority of samples are out-of-phase
-    // Used to reduce a lot of near-zero-sum cases
-    if pre_fft_oop_count > 0.5_f32 * length_f32 {
-        right_channel.par_iter_mut().for_each(|samp| *samp = -*samp);
-    }
-
     // Integrated Loudness shouldn't be affected by DC noise, but this is placed after DC removal just in case
     let true_left_rms = gated_rms(&left_channel, sample_rate);
     let true_right_rms = gated_rms(&right_channel, sample_rate);
