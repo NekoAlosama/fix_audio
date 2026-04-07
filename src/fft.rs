@@ -114,9 +114,17 @@ fn align(original_left: &mut Complex<f32>, original_right: &mut Complex<f32>) {
     // For the following code, we're aiming for a negative exponent so one of the channels become silence
     let align = {
         if left_norm >= right_norm {
-            *original_left + *original_right * f32::exp(right_norm - left_norm)
+            let right_mult = f32::exp(right_norm - left_norm);
+            Complex::new(
+                original_right.re.mul_add(right_mult, original_left.re),
+                original_right.im.mul_add(right_mult, original_left.im),
+            )
         } else {
-            *original_left * f32::exp(left_norm - right_norm) + *original_right
+            let left_mult = f32::exp(left_norm - right_norm);
+            Complex::new(
+                original_left.re.mul_add(left_mult, original_right.re),
+                original_left.im.mul_add(left_mult, original_right.im),
+            )
         }
     };
     let align_norm = f32::sqrt(norm_sqr(align));
@@ -177,18 +185,14 @@ pub fn overlapping_fft(
     // Windows need a bunch of hops.
     // A zipper noise is heard without more overlaps, likely because of phase discontinuities between frames. Fixing this would require dependence on the previous frame.
     // This dependence would then require the function to run in serial instead of parallel, so we'll just do a lot of overlaps to smooth these out.
-    // More overlaps means more discontinuities, but at a reduced amplitude, so it's like a high-frequency noise that's increasing in pitch but decreasing in volume.
+    // More overlaps means more discontinuities, but at a reduced amplitude, so it's like a high-frequency noise that's increasing in pitch but decreasing in volume.v
+    let hop_size = time_frame * 0.001_f32; // equal to sample_rate/20_000, so ideally the generated noise is at 20khz and thus inaudible
     let hop_indexes = {
-        let mut pre_hop_indexes = vec![0_usize];
-        let hop_size = time_frame * 0.001_f32; // equal to sample_rate/20_000, so ideally the generated noise is at 20khz and thus inaudible
-        let mut pre_candidate = hop_size;
-        while let hop_candidate = pre_candidate.round_ties_even() as usize
-            && hop_candidate < extended_length
-        {
-            pre_hop_indexes.push(hop_candidate);
-            pre_candidate += hop_size; // pre_candidate should probably increase by at least 1 at 44.1khz with MIN_FREQ=20
-        }
-        pre_hop_indexes.into_par_iter()
+        let max_index = (extended_length as f32 / hop_size).round_ties_even() as usize;
+
+        (0..max_index)
+            .into_par_iter()
+            .map(|index| (index as f32 * hop_size).round_ties_even() as usize)
     };
 
     // Function moved due to Clippy lint
