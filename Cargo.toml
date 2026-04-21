@@ -1,20 +1,21 @@
 [package]
 name = "fix_audio"
-version = "0.12.2"
+version = "0.12.3"
 edition = "2024"
 
 [dependencies]
 ebur128 = "0.1.10"
 hound = "3.5.*"
 lofty = { git = "https://github.com/Serial-ATA/lofty-rs.git" }
-mimalloc = { version = "0.1.*", features = ["v3", "extended"] }
-rayon = "1.11.*"
+mimalloc = "0.1.*"
+rayon = "1.12.*"
 realfft = "3.5.*"
 symphonia = { git = "https://github.com/pdeljanov/Symphonia.git", branch = "dev-0.6", features = ["opt-simd", "all"] }
 
 [features]
-default = ["final_rotation"]
+default = ["final_rotation", "subsonic_removal"]
 final_rotation = []
+subsonic_removal = []
 
 [profile.dev]
 incremental = false # reason = "reduce size on disk for debug/Clippy builds"

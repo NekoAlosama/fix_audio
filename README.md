@@ -7,7 +7,12 @@ Currently, this program takes in stereo audio files (input folder created on fir
   * Use case: switching between a mono speaker to a car stereo
     * Prevents per-frequency phase cancellation for a better downmix to mono
     * Heavily reduces the perceived stereo width, but instrument placement / channel-specific sounds are preserved
-* Rotates the phase of the result from the above step
+* Low-cuts audio 10Hz and below / High-passes audio 10Hz and above (Enabled by default, feature flag `subsonic_removal`)
+  * Not based on anything in particular
+  * Use case: Remove some subsonic noise (<20Hz audio) that is not worth capturing in music.
+    * Very few stereo systems and headphones allow audio <20Hz audio playback, which would be vibrations felt rather than a tone heard.
+    * Will obviously change the shape of the waveform, but the actual heard content should be the same
+* Rotates the phase of the result from the above step (Enabled by default, feature flag `final_rotation`)
   * Concept based on iZotope RX 11's "Phase" module, can't be automated
   * Use case: Reduce signal peak levels, especially ones amplified due to the above step
     * RX 11's algorithm usually increases peak levels for no good reason
@@ -36,6 +41,7 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
 
 ### Things to do:
 * Add option and confirmation to delete input files after processing
+* Make all steps optional through feature flags or command-line options
 * Improve program efficiency
   * Approximate performance on my workstation:
     * ~5.21 minutes of runtime per 1 hour of 44.1khz audio

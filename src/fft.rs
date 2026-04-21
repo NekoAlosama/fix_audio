@@ -88,11 +88,6 @@ fn get_full_fft_size(length: usize) -> usize {
         .saturating_mul(3_usize.saturating_pow(saved_pow_of_3))
 }
 
-/// Faster `.is_finite()` check compared to `num_traits`.
-const fn is_finite(point: Complex<f32>) -> bool {
-    point.re.is_finite() && point.im.is_finite()
-}
-
 /// Faster `.norm_sqr()` calculation compared to `num_complex`.
 fn norm_sqr(point: Complex<f32>) -> f32 {
     point.re.mul_add(point.re, point.im * point.im)
@@ -106,38 +101,20 @@ fn norm_sqr(point: Complex<f32>) -> f32 {
     reason = "clippy thinks the operations done on Complex<f32> are for integers"
 )]
 fn align(original_left: &mut Complex<f32>, original_right: &mut Complex<f32>) {
-    let left_norm = f32::sqrt(norm_sqr(*original_left));
-    let right_norm = f32::sqrt(norm_sqr(*original_right));
+    let left_norm_sqr = norm_sqr(*original_left);
+    let right_norm_sqr = norm_sqr(*original_right);
 
-    // It seems the best algorithm may be a smooth/soft-argmax algorithm
-    // This is where we have a weighted sum of the channels, but the weight is e^|channel|
-    // For the following code, we're aiming for a negative exponent so one of the channels become silence
-    let align = {
-        if left_norm >= right_norm {
-            let right_mult = f32::exp(right_norm - left_norm);
-            Complex::new(
-                original_right.re.mul_add(right_mult, original_left.re),
-                original_right.im.mul_add(right_mult, original_left.im),
-            )
-        } else {
-            let left_mult = f32::exp(left_norm - right_norm);
-            Complex::new(
-                original_left.re.mul_add(left_mult, original_right.re),
-                original_left.im.mul_add(left_mult, original_right.im),
-            )
-        }
-    };
-    let align_norm = f32::sqrt(norm_sqr(align));
+    let align = *original_left + *original_right;
 
-    let new_left = align * (left_norm / align_norm);
-    let new_right = align * (right_norm / align_norm);
-
-    if is_finite(new_left) && is_finite(new_right) {
-        *original_left = new_left;
-        *original_right = new_right;
+    // The only time that a problem would occur is in this division by an f32 that could be near or at 0_f32.
+    let inv_align_norm_sqr = 1_f32 / norm_sqr(align);
+    if inv_align_norm_sqr.is_finite() {
+        *original_left = align * f32::sqrt(left_norm_sqr * inv_align_norm_sqr);
+        *original_right = align * f32::sqrt(right_norm_sqr * inv_align_norm_sqr);
     } else {
-        // This case occurs if the channels are exactly out-of-phase of are both silence
-        // Hence, the best course of action seems to just be inverting one of the channels
+        // If inv_align_norm_sqr is infinite or NaN, then *original_left is approximately equal to -*original_right,
+        //     so we just invert the right channel since the actual solution is undefined.
+        // This also includes when both channels are silence, so this path becomes hot if there are periods of digital silence.
         *original_right = -*original_right;
     }
 }
@@ -225,6 +202,14 @@ pub fn overlapping_fft(
             _ = r2c.process_with_scratch(&mut right_chunk, &mut pre_right_complex, &mut scratch);
             pre_right_complex
         };
+
+        #[cfg(feature = "subsonic_removal")]
+        {
+            // The first two elements correspond to the 0Hz and 20Hz frequencies, where inbetween frequencies are rounded to the nearest one.
+            // As a crude low-cut/high-pass filter, the 0Hz frequency is removed, thus removing frequencies from 0Hz to 10Hz, randomly inclusive or exclusive.
+            left_complex[0] = Complex::ZERO;
+            right_complex[0] = Complex::ZERO;
+        }
 
         left_complex
             .iter_mut()
