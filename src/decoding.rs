@@ -71,9 +71,12 @@ pub fn get_samples(path: &path::PathBuf) -> SamplesResult {
 
     let track_id = track.id;
 
-    let mut left_samples: Vec<f32> = vec![];
-    let mut right_samples: Vec<f32> = vec![];
+    // Expect 2^23 samples, or about 3.170 minutes of 44.1kHz audio
+    // Then the Vecs are allowed to resize if needed
+    let mut left_samples: Vec<f32> = Vec::with_capacity(0x80_0000);
+    let mut right_samples: Vec<f32> = Vec::with_capacity(0x80_0000);
 
+    // No need to determine the capacity
     let mut sample_buf: Vec<Vec<f32>> = vec![];
     let mut channel_count = 0;
 
@@ -86,6 +89,7 @@ pub fn get_samples(path: &path::PathBuf) -> SamplesResult {
                 Ok(audio_buf) => {
                     // Unsure how to get rid of this statement since it'll be run once, but it might be optimized out
                     if channel_count == 0 {
+                        hint::cold_path(); // Called once, so technically still a cold path
                         channel_count = audio_buf.num_planes();
 
                         // .copy_to_vecs_planar() requires a Vec containing the channels

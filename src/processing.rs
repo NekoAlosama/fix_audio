@@ -61,7 +61,7 @@ pub fn process_samples(
 ) -> Result<AudioPeak, Error> {
     let mut left_channel = data.0;
     let mut right_channel = data.1;
-    let length_f32 = left_channel.len() as f32;
+    let inv_length_f32 = 1_f32 / left_channel.len() as f32;
 
     // Remove DC before processing
     // DC might affect magnitude of `MIN_FREQ` Hz and interpolated values close to it
@@ -69,45 +69,52 @@ pub fn process_samples(
     par_remove_dc(&mut right_channel);
 
     // Out-of-phase checker
-    let oop_counter = |lc: &[f32], rc: &[f32]| -> usize {
+    let oop_counter = |lc: &[f32], rc: &[f32]| -> f32 {
+        // Get the average relative decrease in signal when summing to mono
         lc.par_iter()
             .zip(rc.par_iter())
-            .filter(|&(left_samp, right_samp)| {
-                (left_samp.signum() != right_samp.signum())
-                    && left_samp.is_finite()
-                    && right_samp.is_finite()
+            .map(|(&left_samp, &right_samp)| {
+                // Essentially |left_samp + right_samp| / (|left_samp| + |right_samp|)
+                let multiplier = (left_samp + right_samp).abs().log2()
+                    - (left_samp.abs() + right_samp.abs()).log2();
+
+                // May become infinite if left_samp or right_samp is zero
+                if multiplier.is_finite() {
+                    multiplier * inv_length_f32
+                } else {
+                    // Equal to 1_f32 * inv_length_f32, so multiplier = 1_f32
+                    inv_length_f32
+                }
             })
-            .count()
+            .sum::<f32>()
+            .exp2()
+            - 1_f32
     };
 
-    let pre_fft_oop_count = oop_counter(&left_channel, &right_channel) as f32;
+    let pre_fft_oop_count = oop_counter(&left_channel, &right_channel);
 
-    print!(
-        " (OOP: {:.3?}% ->",
-        100_f32 * pre_fft_oop_count / length_f32
-    );
+    print!(" (OOP: {:.3?}% ->", 100_f32 * pre_fft_oop_count);
     io::stdout().flush()?;
 
     // Integrated Loudness shouldn't be affected by DC noise, but this is placed after DC removal just in case
     let true_left_rms = gated_rms(&left_channel, sample_rate);
     let true_right_rms = gated_rms(&right_channel, sample_rate);
-    let true_mean_rms = f32::sqrt(true_left_rms) * f32::sqrt(true_right_rms);
+    let true_mean_rms = true_left_rms.sqrt() * true_right_rms.sqrt();
 
     // Average out plain RMS of left and right channels before processing
     // Might help in phase conflicts
     // Human hearing doesn't matter here?
     let plain_rms = |channel: &[f32]| {
-        f32::sqrt(
-            channel
-                .par_iter()
-                .filter(|samp| samp.is_finite())
-                .fold(|| 0_f32, |acc, samp| samp.mul_add(*samp, acc))
-                .sum(),
-        )
+        channel
+            .par_iter()
+            .filter(|samp| samp.is_finite())
+            .fold(|| 0_f32, |acc, samp| samp.mul_add(*samp, acc))
+            .sum::<f32>()
+            .sqrt()
     };
     let plain_left_rms = plain_rms(&left_channel);
     let plain_right_rms = plain_rms(&right_channel);
-    let plain_mean_rms = f32::sqrt(plain_left_rms) * f32::sqrt(plain_right_rms);
+    let plain_mean_rms = plain_left_rms.sqrt() * plain_right_rms.sqrt();
     let left_mult = plain_mean_rms / plain_left_rms;
     let right_mult = plain_mean_rms / plain_right_rms;
     left_channel
@@ -129,9 +136,9 @@ pub fn process_samples(
     par_remove_dc(&mut processed_left);
     par_remove_dc(&mut processed_right);
 
-    let post_fft_oop_count = oop_counter(&processed_left, &processed_right) as f32;
+    let post_fft_oop_count = oop_counter(&processed_left, &processed_right);
 
-    print!(" {:.3?}%)", 100_f32 * post_fft_oop_count / length_f32);
+    print!(" {:.3?}%)", 100_f32 * post_fft_oop_count);
     io::stdout().flush()?;
 
     // Average out the loudness of the left and right channels
@@ -164,7 +171,7 @@ pub fn process_samples(
                     // foobar2000 suggests a higher peak for files in this situation, implying that there might be some interpolation occuring for that program
                     *acc
                 } else {
-                    acc.max(samp.abs())
+                    acc.max(abs_samp)
                 }
             },
         );
