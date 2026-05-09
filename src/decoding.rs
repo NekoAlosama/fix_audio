@@ -123,8 +123,11 @@ pub fn get_samples(path: &path::PathBuf) -> SamplesResult {
                 }
                 // For some reason, `Symphonia` is fine if the decode doesn't work?
                 // like with malformed data or something
-                Err(Error::DecodeError(_)) => (),
-                Err(_) => break,
+                Err(Error::DecodeError(_)) => hint::cold_path(),
+                Err(_) => {
+                    hint::cold_path();
+                    break;
+                }
             }
         }
     }

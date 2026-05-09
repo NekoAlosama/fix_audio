@@ -1,4 +1,5 @@
-use core::{f64::consts::TAU, iter::once};
+use core::{f64::consts::TAU, hint, iter::once};
+#[cfg(feature = "final_rotation")]
 use std::sync::Mutex;
 
 use rayon::iter::{IntoParallelIterator as _, ParallelIterator as _};
@@ -101,20 +102,20 @@ fn norm_sqr(point: Complex<f32>) -> f32 {
     reason = "clippy thinks the operations done on Complex<f32> are for integers"
 )]
 fn align(original_left: &mut Complex<f32>, original_right: &mut Complex<f32>) {
-    let left_norm_sqr = norm_sqr(*original_left);
-    let right_norm_sqr = norm_sqr(*original_right);
-
     let align = *original_left + *original_right;
 
     // The only time that a problem would occur is in this division by an f32 that could be near or at 0_f32.
     let inv_align_norm_sqr = 1_f32 / norm_sqr(align);
     if inv_align_norm_sqr.is_finite() {
+        let left_norm_sqr = norm_sqr(*original_left);
+        let right_norm_sqr = norm_sqr(*original_right);
+
         *original_left = align * f32::sqrt(left_norm_sqr * inv_align_norm_sqr);
         *original_right = align * f32::sqrt(right_norm_sqr * inv_align_norm_sqr);
     } else {
         // If inv_align_norm_sqr is infinite or NaN, then *original_left is approximately equal to -*original_right,
         //     so we just invert the right channel since the actual solution is undefined.
-        // This also includes when both channels are silence, so this path becomes hot if there are periods of digital silence.
+        // This path becomes hot if the signal contains silence or simple waves (i.e. sine, triangle, etc., since many frequencies could be 0)
         *original_right = -*original_right;
     }
 }
@@ -354,6 +355,7 @@ pub fn minimize_peak(left_channel: Box<[f32]>, right_channel: Box<[f32]>) -> pro
                 .abs();
             if point_peak == f32::INFINITY {
                 // Ideally, the playback system is smart enough not to play an INFINITY or NEG_INFINITY sample
+                hint::cold_path();
                 continue;
             }
 

@@ -1,4 +1,3 @@
-use core::hint;
 use std::{fs::File, io::BufWriter, path::Path};
 
 use hound::{SampleFormat, WavSpec, WavWriter};
@@ -20,15 +19,14 @@ pub fn export_audio(file_path: &Path, audio: (Box<[f32]>, Box<[f32]>), sample_ra
         WavWriter::create(file_path, spec).expect("Could not create writer");
 
     audio.0.into_iter().zip(audio.1).for_each(|(left, right)| {
-        // cold_path() used since we're not expecting an error
-        writer.write_sample(left).unwrap_or_else(|_| {
-            hint::cold_path();
-            panic!("Could not write sample")
-        });
-        writer.write_sample(right).unwrap_or_else(|_| {
-            hint::cold_path();
-            panic!("Could not write sample")
-        });
+        // SAFETY: can only return an error if we are NOT writing an f32 sample
+        unsafe {
+            writer.write_sample(left).unwrap_unchecked();
+        }
+        // SAFETY: can only return an error if we are NOT writing an f32 sample
+        unsafe {
+            writer.write_sample(right).unwrap_unchecked();
+        }
     });
     writer.finalize().expect("Could not finalize WAV file");
 }
