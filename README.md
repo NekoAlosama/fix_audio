@@ -31,8 +31,8 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
   * Try converting unsupported music files to 32-bit .wav
     * Video files with an audio track
     * .opus files
-    * .mp3 files: does not support invalid CRC checksums, so output files will have added silence
-* Lofty is used to remaps tags to .wav's ID3v2 and RIFF INFO tags, so the conversion is usually lossy; non-standard tags like LYRICS, UNSYNCEDLYRICS/UNSYNCED_LYRICS/'UNSYNCED LYRICS', and 'DYNAMIC RANGE' are likely not copied over.
+    * .mp3 files: does not support invalid CRC checksums, so output files will have added silence or are cut prematurely based on padding
+* Lofty is used to remaps tags to .wav's ID3v2 and RIFF INFO tags, so the conversion is usually lossy; non-standard tags like LYRICS and UNSYNCEDLYRICS/UNSYNCED_LYRICS/'UNSYNCED LYRICS' are likely not copied over.
   * Since this project exports files as .wav, you can try converting input files to 32-bit .wav while keeping tags using another program.
 * FFT does not exactly preserve the shape of waveforms below 20hz
   * Side effect: FFT produces relatively minor frequency smearing / pre-echo depending on chosen frequency

@@ -58,33 +58,35 @@ pub fn process_samples(
     realfft_planner: &mut RealFftPlanner<f32>,
     data: (Box<[f32]>, Box<[f32]>),
     sample_rate: u32,
+    cached_window: &mut Box<[f32]>,
 ) -> Result<AudioPeak, Error> {
     let mut left_channel = data.0;
     let mut right_channel = data.1;
-    let inv_length_f32 = 1_f32 / left_channel.len() as f32;
 
     // Remove DC before processing
     // DC might affect magnitude of `MIN_FREQ` Hz and interpolated values close to it
     par_remove_dc(&mut left_channel);
     par_remove_dc(&mut right_channel);
 
-    // Out-of-phase checker
+    // Mono checker
+    let inv_length_f32 = 1_f32 / left_channel.len() as f32;
     let oop_counter = |lc: &[f32], rc: &[f32]| -> f32 {
-        // Get the average relative decrease in signal when summing to mono
         lc.par_iter()
             .zip(rc.par_iter())
             .map(|(&left_samp, &right_samp)| {
-                // Essentially |left_samp + right_samp| / (|left_samp| + |right_samp|)
-                let multiplier = (left_samp + right_samp).abs().log2()
-                    - (left_samp.abs() + right_samp.abs()).log2();
+                // Get the average relative decrease in signal when summing to mono, only for samples of opposite sign
+                if left_samp.signum() != right_samp.signum() {
+                    // Essentially |left_samp + right_samp| / (|left_samp| + |right_samp|)
+                    let multiplier = (left_samp + right_samp).abs().log2()
+                        - (left_samp.abs() + right_samp.abs()).log2();
 
-                // May become infinite if left_samp or right_samp is zero
-                if multiplier.is_finite() {
-                    multiplier * inv_length_f32
-                } else {
-                    // Equal to 1_f32 * inv_length_f32, so multiplier = 1_f32
-                    inv_length_f32
+                    // May become infinite if left_samp or right_samp is zero
+                    if multiplier.is_finite() {
+                        return multiplier * inv_length_f32;
+                    }
                 }
+                // Equal to 1_f32 * inv_length_f32, so multiplier = 1_f32
+                inv_length_f32
             })
             .sum::<f32>()
             .exp2()
@@ -93,7 +95,7 @@ pub fn process_samples(
 
     let pre_fft_oop_count = oop_counter(&left_channel, &right_channel);
 
-    print!(" (OOP: {:.3?}% ->", 100_f32 * pre_fft_oop_count);
+    print!(" ({:.3?}% ->", 100_f32 * pre_fft_oop_count);
     io::stdout().flush()?;
 
     // Integrated Loudness shouldn't be affected by DC noise, but this is placed after DC removal just in case
@@ -128,8 +130,13 @@ pub fn process_samples(
     let time_frame = (sample_rate as f32) / MIN_FREQ; // actually in number of samples
 
     // Optimum reduction is ~78.5%, first pass reduction is 65%, second pass is ~70%
-    let (mut processed_left, mut processed_right) =
-        fft::overlapping_fft(realfft_planner, time_frame, left_channel, right_channel);
+    let (mut processed_left, mut processed_right) = fft::overlapping_fft(
+        realfft_planner,
+        time_frame,
+        left_channel,
+        right_channel,
+        cached_window,
+    );
 
     // STFT will generate sub-MIN_FREQ noise
     // As such, DC noise is likely added and should be removed since we'll multiply the signals later

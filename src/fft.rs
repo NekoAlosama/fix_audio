@@ -1,29 +1,14 @@
-use core::{f64::consts::TAU, hint, iter::once};
-#[cfg(feature = "final_rotation")]
-use std::sync::Mutex;
-
+use core::iter::once;
 use rayon::iter::{IntoParallelIterator as _, ParallelIterator as _};
 use realfft::{RealFftPlanner, num_complex::Complex};
+use std::sync::Mutex;
 
 #[cfg(feature = "final_rotation")]
 use crate::processing;
 #[cfg(feature = "final_rotation")]
 use core::f32::consts::PI;
-
-/// List of cosine coefficients of window function.
-///
-/// Taken from <https://holometer.fnal.gov/GH_FFT.pdf>.
-// Ideal candidate is probably HFT144D, a flat top window which needs 7 overlaps and has a noise floor of -144.1dB,
-//   almost enough for 24-bit integer audio, definitely good enough for the humman auditory system
-// Note that the large (normalized) effective noise bandwidth just indicates that the resulting FFT output is scaled up by some number
-const WINDOW_COSINES: [(f64, f64); 6] = [
-    (1. * TAU, -1.967_600_33),
-    (2. * TAU, 1.579_836_07),
-    (3. * TAU, -0.811_236_44),
-    (4. * TAU, 0.225_835_58),
-    (5. * TAU, -0.027_738_48),
-    (6. * TAU, 0.000_903_60),
-];
+#[cfg(feature = "final_rotation")]
+use core::hint;
 
 /// Base-2 logarithm of 3 for `get_full_fft_size()` for an arbitrary FFT size.
 const LB_3: f32 = 1.584_962_5;
@@ -32,17 +17,20 @@ const LB_3: f32 = 1.584_962_5;
 ///   to prevent discontinuities, which causes spectral leakage (noise tuned to the music).
 // This is a periodic window, where the first point is zero and the ending point is non-zero, with the idea that the next window has the next zero point.
 // Choosing a symmetric window with both or neither endpoints being zero doesn't seem to matter much here.
-fn window(time_frame: usize) -> Box<[f32]> {
-    let f64_rate_recip = (time_frame as f64).recip();
-    // The actual level of the window doesn't really matter
-    (0..time_frame)
+// The specific window being used is an approximation of a cosh window (alpha = 16.0), which is then an approximation of the DPSS/Slepian window.
+//   One paper I read had a max alpha = 15.0 with about -100dB sidelobes, so 16.0 can't hurt.
+pub fn window(sample_count: usize) -> Box<[f32]> {
+    let f64_rate_recip = (sample_count as f64).recip();
+
+    (0..sample_count)
         .into_par_iter()
         .map(|n| {
-            WINDOW_COSINES
-                .into_iter()
-                .fold(1_f64, |acc, (internal, external)| {
-                    external.mul_add(f64::cos(internal * n as f64 * f64_rate_recip), acc)
-                }) as f32
+            let point = n as f64 * f64_rate_recip;
+            point
+                .mul_add(-point, point)
+                .sqrt()
+                .mul_add(32.0, -16.0)
+                .exp() as f32
         })
         .collect()
 }
@@ -127,24 +115,24 @@ fn align(original_left: &mut Complex<f32>, original_right: &mut Complex<f32>) {
 )]
 pub fn overlapping_fft(
     realfft_planner: &mut RealFftPlanner<f32>,
-    time_frame: f32,
+    sample_count: f32,
     left_channel: Box<[f32]>,
     right_channel: Box<[f32]>,
+    cached_window: &mut Box<[f32]>,
 ) -> (Box<[f32]>, Box<[f32]>) {
-    // Idea is that time_frame gives us the amount of samples (possibly fractional) that we need to FFT
-    let rounded_time_frame = time_frame.round_ties_even() as usize;
+    // Idea is that sample_count gives us the amount of samples (possibly fractional) that we need to FFT
+    let rounded_sample_count = sample_count.round_ties_even() as usize;
     // We should pad with half-a-second of silence to allow for half-windows at the beginning and end
-    let half_time_frame = (time_frame * 0.5_f32).round_ties_even() as usize;
+    let half_sample_count = (sample_count * 0.5_f32).round_ties_even() as usize;
 
-    // Since we're using a flat-top window and doing overlaps, we can probably assume that there should be no zero-padding aside from what's needed for a fast FFT.
-    // Plus, adding more padding will increase the runtime non-linearly. In this case, it's probably better to add more overlaps instead, since that is linear.
-    let fft_size = get_stft_frame_size(rounded_time_frame);
+    // Adding more padding will increase the runtime non-linearly. In this case, it's probably better to add more overlaps instead, since that is linear.
+    let fft_size = get_stft_frame_size(rounded_sample_count);
     let fft_sqrt_norm = f32::sqrt(1_f32 / fft_size as f32);
 
     // We need a bit of silence at the beginning
     // This consumes left_channel and right_channel
     let build = |channel: Box<[f32]>| {
-        vec![0_f32; half_time_frame]
+        vec![0_f32; half_sample_count]
             .into_iter()
             .chain(channel)
             .collect::<Box<[f32]>>()
@@ -158,13 +146,17 @@ pub fn overlapping_fft(
     let c2r = realfft_planner.plan_fft_inverse(fft_size);
     let holding_left = Mutex::new(vec![0_f32; extended_length].into_boxed_slice());
     let holding_right = Mutex::new(vec![0_f32; extended_length].into_boxed_slice());
-    let window = window(rounded_time_frame);
+
+    // Use pre-calculated window if possible. Otherwise, just overwrite it.
+    if cached_window.len() != rounded_sample_count {
+        *cached_window = window(rounded_sample_count);
+    }
 
     // Windows need a bunch of hops.
     // A zipper noise is heard without more overlaps, likely because of phase discontinuities between frames. Fixing this would require dependence on the previous frame.
     // This dependence would then require the function to run in serial instead of parallel, so we'll just do a lot of overlaps to smooth these out.
-    // More overlaps means more discontinuities, but at a reduced amplitude, so it's like a high-frequency noise that's increasing in pitch but decreasing in volume.v
-    let hop_size = time_frame * 0.001_f32; // equal to sample_rate/20_000, so ideally the generated noise is at 20khz and thus inaudible
+    // More overlaps means more discontinuities, but at a reduced amplitude, so it's like a high-frequency noise that's increasing in pitch but decreasing in volume.
+    let hop_size = sample_count * 0.001_f32; // equal to sample_rate/20_000, so ideally the generated noise is at 20khz and thus inaudible
     let hop_indexes = {
         let max_index = (extended_length as f32 / hop_size).round_ties_even() as usize;
 
@@ -178,8 +170,8 @@ pub fn overlapping_fft(
         channel
             .iter()
             .skip(hold_pos)
-            .take(rounded_time_frame)
-            .zip(window.iter())
+            .take(rounded_sample_count)
+            .zip(cached_window.iter())
             .map(|(&samp, &mult)| samp * mult)
             .chain(once(0_f32).cycle()) // Extend iterator by cycling 0
             .take(fft_size)
@@ -251,7 +243,6 @@ pub fn overlapping_fft(
         add_to_hold(right_chunk, &holding_right);
     });
 
-    // Overlap-adding amplifies the signal by (WINDOW_COSINES.len() as f32 + 1_f32) or 1/hop_time_frame
     // Normalization happens later in processing.rs
 
     let collect = |channel: Mutex<Box<[f32]>>| {
@@ -259,7 +250,7 @@ pub fn overlapping_fft(
             .into_inner()
             .expect("Critical thread was killed")
             .into_iter() // Don't think doing .into_par_iter() does anything
-            .skip(half_time_frame)
+            .skip(half_sample_count)
             .collect()
     };
     (collect(holding_left), collect(holding_right))

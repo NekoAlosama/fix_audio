@@ -79,6 +79,7 @@ fn main() -> Result<(), Error> {
 
     // Because the STFT size shouldn't be that large (9600 max), we can reuse it, even for smaller sizes
     let mut realfft_planner = RealFftPlanner::new();
+    let mut cached_window = fft::window(2400); // 48000 / 20
 
     println!("Setup and file-exploring time: {:#.3?}", time.elapsed());
     for entry in entries {
@@ -131,8 +132,12 @@ fn main() -> Result<(), Error> {
 
         print!("	Processing...");
         io::stdout().flush()?;
-        let (modified_audio, modified_audio_peak) =
-            processing::process_samples(&mut realfft_planner, channels, sample_rate)?;
+        let (modified_audio, modified_audio_peak) = processing::process_samples(
+            &mut realfft_planner,
+            channels,
+            sample_rate,
+            &mut cached_window,
+        )?;
         let modified_tags = processing::process_metadata(tags, modified_audio_peak);
         print!(" (T+{:#.3?}),", time.elapsed());
         io::stdout().flush()?;
