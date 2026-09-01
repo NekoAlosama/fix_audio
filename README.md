@@ -44,7 +44,7 @@ Processed audio files are sent to the output folder as 32-bit floating-point .wa
 * Make all steps optional through feature flags or command-line options
 * Improve program efficiency
   * Approximate performance on my workstation:
-    * ~5.21 minutes of runtime per 1 hour of 44.1khz audio
+    * ~4.31 minutes of runtime per 1 hour of 44.1khz audio
   * Possible slowdown due to CPU affinity (`rayon` does not implement CPU pinning or similar) or other applications
   * (Windows only) Set the program's priority class (Idle -> Above Normal) and I/O priority (Normal -> High)
     * Approximate 50% speedup (90s to 60s on an old test suite) using System Informer to apply priorities

@@ -55,7 +55,6 @@ as_conversions =                "allow" # reason = "some conversions are require
 cast_sign_loss =                "allow" # reason = "only positive/unsigned values used"
 float_arithmetic =              "allow" # reason = "float arithmetic is required"
 implicit_return =               "allow" # reason = "make things rusty"
-indexing_slicing =              "allow" # reason = "trust in the compiler to optimize out bounds checks and keep panics"
 print_stdout =                  "allow" # reason = "printing to console is required"
 question_mark_used =            "allow" # reason = "no need to add additional error info"
 semicolon_outside_block =       "allow" # reason = "personal preference"

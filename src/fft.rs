@@ -1,17 +1,18 @@
 use core::iter::once;
 use rayon::iter::{IntoParallelIterator as _, ParallelIterator as _};
 use realfft::{RealFftPlanner, num_complex::Complex};
-use std::sync::Mutex;
+use std::{io::Error, sync::Mutex};
 
 #[cfg(feature = "final_rotation")]
 use crate::processing;
 #[cfg(feature = "final_rotation")]
-use core::f32::consts::PI;
-#[cfg(feature = "final_rotation")]
-use core::hint;
+use core::f64::consts::PI;
 
 /// Base-2 logarithm of 3 for `get_full_fft_size()` for an arbitrary FFT size.
 const LB_3: f32 = 1.584_962_5;
+
+/// Filler type being used because of a Clippy lint.
+type FftResult = Result<(Box<[f32]>, Box<[f32]>), Error>;
 
 /// Windowing is used to make the signal chunk fade in and out
 ///   to prevent discontinuities, which causes spectral leakage (noise tuned to the music).
@@ -54,20 +55,20 @@ fn get_stft_frame_size(length: usize) -> usize {
 
 /// Returns an FFT size in the form of `2^n * 3^m` since `rustfft` claims to work the fastest on these types.
 fn get_full_fft_size(length: usize) -> usize {
-    let lb_length = f32::log2(length as f32);
+    let lb_length = (length as f32).log2();
     let mut saved_pow_of_2 = 0;
     let mut saved_pow_of_3 = 0;
     let mut lowest_remainder = 1.0_f32;
 
-    let max_pow_of_3 = f32::ceil(lb_length / LB_3) as u32;
+    let max_pow_of_3 = (lb_length / LB_3).ceil() as u32;
 
     for test_pow_of_3 in 0..=max_pow_of_3 {
         let criteria = (-LB_3).mul_add(test_pow_of_3 as f32, lb_length); // lb_length - saved_pow_of_3 * LB_3 
-        let test_remainder = f32::ceil(criteria) - criteria;
+        let test_remainder = criteria.ceil() - criteria;
 
         if test_remainder < lowest_remainder {
             lowest_remainder = test_remainder;
-            saved_pow_of_2 = f32::ceil(criteria) as u32;
+            saved_pow_of_2 = (criteria).ceil() as u32;
             saved_pow_of_3 = test_pow_of_3;
         }
     }
@@ -77,34 +78,61 @@ fn get_full_fft_size(length: usize) -> usize {
         .saturating_mul(3_usize.saturating_pow(saved_pow_of_3))
 }
 
-/// Faster `.norm_sqr()` calculation compared to `num_complex`.
-fn norm_sqr(point: Complex<f32>) -> f32 {
+/// Faster `.norm_sqr()` or power calculation compared to `num_complex`.
+fn norm_sqr(point: Complex<f64>) -> f64 {
     point.re.mul_add(point.re, point.im * point.im)
 }
 
 /// Aligns the phase angle of the left and right channels.
 // According to Intel VTune Profiler, this is the hottest function since it's in a hot loop.
 // I've tried a branchless and an SIMD version, but they pretty much compile to the same peformance.
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "clippy thinks the operations done on Complex<f32> are for integers"
-)]
 fn align(original_left: &mut Complex<f32>, original_right: &mut Complex<f32>) {
-    let align = *original_left + *original_right;
+    let left = Complex::new(f64::from(original_left.re), f64::from(original_left.im));
+    let right = Complex::new(f64::from(original_right.re), f64::from(original_right.im));
 
-    // The only time that a problem would occur is in this division by an f32 that could be near or at 0_f32.
-    let inv_align_norm_sqr = 1_f32 / norm_sqr(align);
-    if inv_align_norm_sqr.is_finite() {
-        let left_norm_sqr = norm_sqr(*original_left);
-        let right_norm_sqr = norm_sqr(*original_right);
+    // Check if the points are more than 90 degrees away from each other
+    // Equal to real(left * conj(right))
+    let out_of_phase_checker = left.re.mul_add(right.re, left.im * right.im);
+    if out_of_phase_checker < 0_f64 {
+        let left_power = norm_sqr(left);
+        let right_power = norm_sqr(right);
 
-        *original_left = align * f32::sqrt(left_norm_sqr * inv_align_norm_sqr);
-        *original_right = align * f32::sqrt(right_norm_sqr * inv_align_norm_sqr);
-    } else {
-        // If inv_align_norm_sqr is infinite or NaN, then *original_left is approximately equal to -*original_right,
-        //     so we just invert the right channel since the actual solution is undefined.
-        // This path becomes hot if the signal contains silence or simple waves (i.e. sine, triangle, etc., since many frequencies could be 0)
-        *original_right = -*original_right;
+        // We will manipulate the quieter channel
+        if left_power >= right_power {
+            // The original idea for this was to multiply the quieter channel by -1 to get closer to the louder channel while maintaining some distance.
+            // e.g. If the quieter channel is -91 degrees away from the louder channel, then it'll become +89 degrees away.
+            // Oddly enough, this gives a 53.247% - 54.300% correlation on white/pink/brown noise.
+
+            // Luckily, there is another point with the same distance to the louder channel, but requires a lower rotation angle.
+            // Let A, B be complex numbers, with |A| > |B|.
+            // Using the out_of_phase_checker above, suppose that A.re * B.re + A.im * B.im is negative.
+            // This can become positive with A.re * (-B).re + A.im * (-B).im.
+            // However, there is a second point that can be obtained by reflecting across the line connecting A with the origin (y = (A.im / A.re) * x).
+            // e.g. with the example above, the quieter channel will become -89 degrees away.
+            // This gives a 50.430% - 51.945% correlation on white/pink/brown noise. The extra percent could be due to normalization.
+
+            let left_power_recip = left_power.recip();
+            if left_power_recip.is_finite() {
+                // foot of the perpendicular or something like that
+                let foot =
+                    2_f64 * left_power_recip * left.re.mul_add(right.im, -left.im * right.re);
+                *original_right = Complex::new(
+                    foot.mul_add(-left.im, -right.re) as f32,
+                    foot.mul_add(left.re, -right.im) as f32,
+                );
+            }
+        } else {
+            // ^^^
+            let right_power_recip = right_power.recip();
+            if right_power_recip.is_finite() {
+                let foot =
+                    2_f64 * right_power_recip * right.re.mul_add(left.im, -right.im * left.re);
+                *original_left = Complex::new(
+                    foot.mul_add(-right.im, -left.re) as f32,
+                    foot.mul_add(right.re, -left.im) as f32,
+                );
+            }
+        }
     }
 }
 
@@ -115,19 +143,19 @@ fn align(original_left: &mut Complex<f32>, original_right: &mut Complex<f32>) {
 )]
 pub fn overlapping_fft(
     realfft_planner: &mut RealFftPlanner<f32>,
-    sample_count: f32,
+    sample_count: f64,
     left_channel: Box<[f32]>,
     right_channel: Box<[f32]>,
     cached_window: &mut Box<[f32]>,
-) -> (Box<[f32]>, Box<[f32]>) {
+) -> FftResult {
     // Idea is that sample_count gives us the amount of samples (possibly fractional) that we need to FFT
     let rounded_sample_count = sample_count.round_ties_even() as usize;
     // We should pad with half-a-second of silence to allow for half-windows at the beginning and end
-    let half_sample_count = (sample_count * 0.5_f32).round_ties_even() as usize;
+    let half_sample_count = (sample_count * 0.5_f64).round_ties_even() as usize;
 
     // Adding more padding will increase the runtime non-linearly. In this case, it's probably better to add more overlaps instead, since that is linear.
     let fft_size = get_stft_frame_size(rounded_sample_count);
-    let fft_sqrt_norm = f32::sqrt(1_f32 / fft_size as f32);
+    let fft_sqrt_norm = (fft_size as f32).sqrt().recip();
 
     // We need a bit of silence at the beginning
     // This consumes left_channel and right_channel
@@ -156,13 +184,13 @@ pub fn overlapping_fft(
     // A zipper noise is heard without more overlaps, likely because of phase discontinuities between frames. Fixing this would require dependence on the previous frame.
     // This dependence would then require the function to run in serial instead of parallel, so we'll just do a lot of overlaps to smooth these out.
     // More overlaps means more discontinuities, but at a reduced amplitude, so it's like a high-frequency noise that's increasing in pitch but decreasing in volume.
-    let hop_size = sample_count * 0.001_f32; // equal to sample_rate/20_000, so ideally the generated noise is at 20khz and thus inaudible
+    let hop_size = sample_count * 0.001_f64; // equal to sample_rate/20_000, so ideally the generated noise is at 20khz and thus inaudible
     let hop_indexes = {
-        let max_index = (extended_length as f32 / hop_size).round_ties_even() as usize;
+        let max_index = (extended_length as f64 / hop_size).round_ties_even() as usize;
 
         (0..max_index)
             .into_par_iter()
-            .map(|index| (index as f32 * hop_size).round_ties_even() as usize)
+            .map(|index| (index as f64 * hop_size).round_ties_even() as usize)
     };
 
     // Function moved due to Clippy lint
@@ -200,8 +228,10 @@ pub fn overlapping_fft(
         {
             // The first two elements correspond to the 0Hz and 20Hz frequencies, where inbetween frequencies are rounded to the nearest one.
             // As a crude low-cut/high-pass filter, the 0Hz frequency is removed, thus removing frequencies from 0Hz to 10Hz, randomly inclusive or exclusive.
-            left_complex[0] = Complex::ZERO;
-            right_complex[0] = Complex::ZERO;
+            // SAFETY: fft_size is never zero.
+            *unsafe { left_complex.get_unchecked_mut(0) } = Complex::ZERO;
+            // SAFETY: fft_size is never zero.
+            *unsafe { right_complex.get_unchecked_mut(0) } = Complex::ZERO;
         }
 
         left_complex
@@ -229,7 +259,7 @@ pub fn overlapping_fft(
                 .zip(
                     hold_channel
                         .lock()
-                        .expect("Critical thread was killed")
+                        .expect("Critical thread was killed.")
                         .iter_mut()
                         .skip(holding_position),
                 )
@@ -243,17 +273,19 @@ pub fn overlapping_fft(
         add_to_hold(right_chunk, &holding_right);
     });
 
+    drop(extended_left);
+    drop(extended_right);
+
     // Normalization happens later in processing.rs
 
-    let collect = |channel: Mutex<Box<[f32]>>| {
-        channel
-            .into_inner()
-            .expect("Critical thread was killed")
+    let collect = |channel: Mutex<Box<[f32]>>| -> Result<Box<[f32]>, Error> {
+        let check = channel.into_inner().map_err(Error::other)?;
+        Ok(check
             .into_iter() // Don't think doing .into_par_iter() does anything
             .skip(half_sample_count)
-            .collect()
+            .collect())
     };
-    (collect(holding_left), collect(holding_right))
+    Ok((collect(holding_left)?, collect(holding_right)?))
 }
 
 #[cfg(feature = "final_rotation")]
@@ -279,7 +311,7 @@ pub fn minimize_peak(left_channel: Box<[f32]>, right_channel: Box<[f32]>) -> pro
         let c2r = long_realfft_planner.plan_fft_inverse(fft_size);
         let mut scratch = c2r.make_scratch_vec().into_boxed_slice();
 
-        fft_sqrt_norm = f32::sqrt(1_f32 / fft_size as f32);
+        fft_sqrt_norm = (fft_size as f32).sqrt().recip();
 
         // Function reduced
         let mut compute_rotated_channel = |channel: &[f32]| {
@@ -308,6 +340,19 @@ pub fn minimize_peak(left_channel: Box<[f32]>, right_channel: Box<[f32]>) -> pro
         )
     };
 
+    // Since the multiplications take a long time to compute, the best way for me to get a good estimate would be by sampling in fixed intervals.
+    // 1 to 31 since 0 or 32 will be the original level.
+    // Seems good enough, actual best peak value is probably lower by 0.5dB or less
+    let mut saved_angle = Complex::new(1_f32, 0_f32);
+    let mut saved_peak = left_channel
+        .iter()
+        .chain(right_channel.iter())
+        .fold(f32::NEG_INFINITY, |acc, samp| acc.max(samp.abs()));
+    let candidate_angle = (1_i32..=31_i32).map(|numerator| {
+        let (sine, cosine) = (f64::from(numerator) * PI / 32_f64).sin_cos();
+        Complex::new(cosine as f32, -sine as f32)
+    });
+
     let analytic_left = left_channel
         .into_iter()
         .zip(rotated_left)
@@ -319,23 +364,9 @@ pub fn minimize_peak(left_channel: Box<[f32]>, right_channel: Box<[f32]>) -> pro
         .map(|(right, rot_right)| Complex::new(right, rot_right))
         .collect::<Box<[Complex<f32>]>>();
 
-    // Since the multiplications take a long time to compute, the best way for me to get a good estimate would be by sampling in fixed intervals.
-    // 1 to 31 since 0 or 32 will be the original level.
-    // Seems good enough, actual best peak value is probably lower by 0.5dB or less
-    // Unfortunately also makes the track `ReplayGain` slightly inaccurate (usually no change, but sometimes 0.15dB change or less).
-    // No idea why this happens, but it could just be that the EBU R 128 loudness estimate does change with phase rotations.
-    let mut saved_angle = Complex::new(1_f32, 0_f32);
-    let mut saved_peak = analytic_left
-        .iter()
-        .chain(analytic_right.iter())
-        .fold(f32::NEG_INFINITY, |acc, point| {
-            f32::max(acc, point.re.abs())
-        });
-    let candidate_angle = (1_i32..=31_i32).map(|numerator| {
-        let (sine, cosine) = f32::sin_cos(numerator as f32 * PI / 32_f32);
-        Complex::new(cosine, -sine)
-    });
     // Short-circuting loop
+    // It doesn't seem like making this parallel helps,
+    //     as rayon would just spawn a lot of threads and then have to kill all of them if a bad angle is found.
     for test_angle in candidate_angle {
         let mut good_angle = true;
         let mut local_max_peak = f32::NEG_INFINITY;
@@ -344,11 +375,6 @@ pub fn minimize_peak(left_channel: Box<[f32]>, right_channel: Box<[f32]>) -> pro
                 .re
                 .mul_add(test_angle.re, point.im * test_angle.im)
                 .abs();
-            if point_peak == f32::INFINITY {
-                // Ideally, the playback system is smart enough not to play an INFINITY or NEG_INFINITY sample
-                hint::cold_path();
-                continue;
-            }
 
             if point_peak > saved_peak {
                 good_angle = false;

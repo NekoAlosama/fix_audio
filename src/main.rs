@@ -27,6 +27,7 @@ const INPUT_DIR: &str = "./inputs/";
 const OUTPUT_DIR: &str = "./outputs/";
 
 /// Recursive file path retriever from `StackOverflow`.
+///
 /// TODO: check if there's a newer std function or crate to do this.
 fn get_paths(directory: path::PathBuf) -> io::Result<Box<[path::PathBuf]>> {
     let mut entries: Vec<path::PathBuf> = vec![];
@@ -57,7 +58,7 @@ fn main() -> Result<(), Error> {
             ((local_threads * 0.8).round_ties_even() as usize).max(1_usize) // Seems okay to use ~80% of the cores
         })
         .build_global()
-        .expect("ERROR: Thread pool build error.");
+        .map_err(|err| Error::IoError(io::Error::other(err)))?;
 
     // Keeping the time for benchmarking
     let time = time::Instant::now();
@@ -90,11 +91,20 @@ fn main() -> Result<(), Error> {
         io::stdout().flush()?; // Show print instantly
         let mut output_path = path::PathBuf::from(OUTPUT_DIR).join(stripped_entry);
 
+        // Tags are collected first in order to calculate the number of samples needed to collect in `decoding::get_samples()`
+        let Ok((tags, sample_rate, sample_count)) = decoding::get_metadata(&entry) else {
+            // Catches most non-audio files such as pictures
+            println!("	Not audio or just unsupported; sent to output.");
+            // SAFETY: output_path is defined, so it cannot be on the root
+            fs::create_dir_all(unsafe { output_path.parent().unwrap_unchecked() })?;
+            fs::rename(entry, output_path)?;
+            continue;
+        };
+
         // If we can't properly decode the data, it's likely not audio data
         // In this case, we just send it to OUTPUT_DIR so it's not spitting the warning every run
-        let channels = match decoding::get_samples(&entry) {
+        let channels = match decoding::get_samples(&entry, sample_count) {
             Ok(data) => data,
-            // Catches most non-audio files such as pictures
             // Also catches detected-but-unimplemented audio like Opus files
             Err(Error::Unsupported(_)) => {
                 println!("	Not audio or just unsupported; sent to output.");
@@ -125,8 +135,6 @@ fn main() -> Result<(), Error> {
             Err(other) => return Err(other), // some other unknown error
         };
 
-        let (tags, sample_rate) = decoding::get_metadata(&entry);
-
         print!(" (T+{:#.3?}),", time.elapsed());
         io::stdout().flush()?;
 
@@ -147,7 +155,7 @@ fn main() -> Result<(), Error> {
         output_path.set_extension("wav");
         // SAFETY: output_path is defined, so it cannot be on the root
         fs::create_dir_all(unsafe { output_path.parent().unwrap_unchecked() })?;
-        exporting::export_audio(&output_path, modified_audio, sample_rate);
+        exporting::export_audio(&output_path, modified_audio, sample_rate)?;
         // Unfortunately doubles Exporting time and memory since `hound` clears all tags when calling `.finalize()`
         exporting::write_tags(&output_path, modified_tags);
 
